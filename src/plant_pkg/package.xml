@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>plant_pkg</name>
+  <version>0.0.1</version>
+  <description>
+    STEP22 시뮬레이션 호스트(plant_node) — Isaac Sim 씬/물리/카메라/IK를 담는 5번째
+    프로세스. 실제 하드웨어가 아닌 시뮬레이터 자체를 담는 그릇이라 vision/control/
+    hardware_pkg와 달리 system python이 아닌 Isaac Sim 번들 파이썬(python.sh)에서만
+    돌 수 있다. ros2 run은 시스템 python으로 실행되므로, 이 패키지의 실행파일은
+    python.sh로 재실행(exec)만 하는 얇은 런처다 — 실제 구현은 plant_pkg/plant_node.py.
+  </description>
+  <maintainer email="ekgks3451@gmail.com">da</maintainer>
+  <license>TODO</license>
+
+  <depend>common_pkg</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

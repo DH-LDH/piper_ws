@@ -1,0 +1,12 @@
+# colcon build artifacts
+build/
+install/
+log/
+
+# python
+__pycache__/
+*.pyc
+
+# vendor mesh assets (ranger_base.dae alone is 105MB, over GitHub's 100MB file limit;
+# these are supplied by the Ranger Mini vendor SDK, not authored here)
+meshes/
