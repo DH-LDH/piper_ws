@@ -15,7 +15,7 @@ from geometry_msgs.msg import Point
 from step22_common import (
     KEEP_DIST, OBJ_CENTER_BODY, HOLD_MAX, SEARCH_Q, GRASP_APPROACH_DIR,
     HOVER_STANDOFF, HOVER_APPROACH_DIR, EE_GRIP_OFFSET, MK_TOP_OFFSET,
-    BODY_LINK_WORLD_Z, PLACE_APPROACH_DIR,
+    BODY_LINK_WORLD_Z, PLACE_APPROACH_DIR, PLACE_CENTER_BODY_GUESS,
     OBJ_S, BOARD_T, CELL_GAP, CELL_T,
     unpack_chassis_pose, unpack_eih_marker, pack_joint_hold_target,
 )
@@ -138,9 +138,17 @@ class ArmNode(Node):
         self.verify_high_hits = 0    # 그중 "높은 위치"(=들려 있음) 관측 수
         self.verify_bz_last = None   # 마지막 관측 높이(로그용)
 
-        # place(픽 후 선반에 놓기)
+        # place(픽 후 선반에 놓기) — use_marker_place=True(실물, AMR 없음)면 마커 기반
+        # place_ready~place_descend 경로를 쓰고, False(기본값, 기존 sim 경로)면 도킹
+        # 좌표만으로 수직 하강하는 place_lower 경로를 그대로 쓴다.
+        self.use_marker_place = bool(
+            self.declare_parameter("use_marker_place", False).value)
         self.place_est = None        # 차체캠이 본 place 선반 (bx,by,phi)
-        self.ml_place_center = np.zeros(3)  # place_dock 완료 시점 선반 중심(1회 스냅샷, 대략치)
+        self.ml_place_center = (np.array(PLACE_CENTER_BODY_GUESS, float)
+                                 if self.use_marker_place else np.zeros(3))
+        # place_dock(AMR)이 없는 실물 경로에서는 위 자리표시자가 유일한 기준점이라
+        # amr_node가 있던 sim과 달리 아무도 갱신해주지 않는다 — 마커 재검출
+        # (place_detect/place_descend)이 이 추정치를 실제 위치로 보정한다.
         self.place_wait_n = 0        # place_descend의 물리도달 대기 카운터(grasp_wait_n과 동일 용도)
         self.place_top_new = None    # 손목캠이 본 상판 마커(ID6) 최신 관측(body_link 상대)
         self.ml_place_anchor = None  # place_detect 최초 검출 놓는점(z-drop/점프 판정 기준)
@@ -177,6 +185,10 @@ class ArmNode(Node):
 
     def _on_place_lock(self, msg: Bool):
         if not msg.data or self.arm_phase != "place_wait": return
+        if self.use_marker_place:
+            print("      → place_lock 수신, 마커 기반 플레이스 시퀀스 개시(place_ready)\n")
+            self.arm_phase = "place_ready"; self.arm_step = 0
+            return
         print("      → place_lock 수신, 플레이스 시퀀스 개시\n")
         # 단순화 경로: 도킹이 이미 거리를 맞춰줬으므로 지금 팔 자세 그대로 그리퍼만
         # 수직으로 PLACE_LOWER_DIST만큼 내린다(마커 기반 정밀 배치는 IK가 이상한 해로

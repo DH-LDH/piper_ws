@@ -178,6 +178,12 @@ CONV_VELOCITY = 0.300  # [m/s] 벨트 속도 — 플랜트/AMR 양쪽이 그대�
 OBJ_CENTER_BODY = (0.0, KEEP_DIST, CONV_Z + CONV_H/2 + OBJ_S/2.0)
 CONV_GAP_FROM_AMR = 0.60  # [m] 벨트 몸체를 AMR 스폰 지점에서 얼마나 떨어뜨릴지(차체 충돌 방지)
 
+# 실물(AMR 없이 팔 단독) 마커기반 place 경로 전용 — 두 번째 아르코 마커(PLACE_TOP_MARKER_ID)가
+# 대략 있을 것으로 보이는 body_link 상대위치. arm_node.py의 place_ready/place_hover가
+# 이 값으로 먼저 접근한 뒤 place_detect/place_descend가 실제 마커 재검출로 정밀 보정한다.
+# TODO(실측 필요): 지금은 자리표시자 — 실제 두 번째 마커 배치 위치로 반드시 갱신할 것.
+PLACE_CENTER_BODY_GUESS = (0.20, KEEP_DIST, OBJ_CENTER_BODY[2])
+
 
 _HALF = MARKER_SIZE / 2.0
 OBJ_PTS = np.array([[-_HALF,_HALF,0.],[_HALF,_HALF,0.],
