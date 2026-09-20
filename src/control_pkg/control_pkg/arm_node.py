@@ -32,111 +32,64 @@ EE_SPEED_GRASP = 0.025   # [m/s] 최종 하강 속도(가장 느림)
 EE_SPEED_LIFT  = 0.06    # [m/s] 리프트 속도
 MOVE_L_PERIOD  = 3       # [스텝] 이 주기마다 한 번씩 목표점 갱신
 
-# 파지점 기하 (self.ee_grip_offset은 step22_common에서 import — hover 계산과 공유)
-APPROACH_DIST     = 0.05 # [m] 파지점 위 pre-grip 대기 높이 (launch: approach_dist)
-GRASP_DEPTH_EXTRA = 0.010  # [m] 마커 평면보다 더 내려가는 깊이 (launch: grasp_depth_extra)
+# 파지점 기하
+APPROACH_DIST     = 0.05   # [m] 파지점 위 pre-grip 대기 높이 (launch: approach_dist)
+GRASP_DEPTH_EXTRA = 0.010  # [m] 마커면보다 더 내려가는 깊이 = 물체 높이/2 (launch: grasp_depth_extra)
 
-# 최초 검출(detect) 타당성 게이트 — 기대 위치에서 너무 벗어난 검출은 오검출로 기각
-DETECT_MAX_ERR = 0.25  # [m] obj_expected_*_body 추정 오차를 감안해 넉넉히 둔 값
+# 재검출 수용 한계 — XY 오검출은 헛집고 재시도하면 되지만 z 오검출은 테이블을 찍는다
+DETECT_MAX_ERR = 0.25  # [m] 최초 검출이 기대 위치에서 이보다 벗어나면 오검출로 기각
 PRE_REDETECT     = True
-# 재검출 수용 한계를 축별로 나눈다 — 오검출이 통과했을 때의 결과가 축마다 다르기 때문.
-# XY로 틀리면 헛집고 재시도하면 그만이지만, z로 아래로 틀리면 손가락이 테이블을 찍는다.
-# 그래서 XY는 관대하게(물체가 움직여도 따라가게), z는 좁게 둔다. 참고로 파지 직전
-# (렌즈~마커 120mm)에는 화각 여유가 85mm라 XY는 이 한계보다 화각이 먼저 막는다.
-PRE_REDETECT_MAX_XY   = 0.12  # [m] pre 구간 XY 누적 허용(launch: redetect_max_xy)
-GRASP_JUMP_MAX_XY     = 0.15  # [m] grasp 구간 XY 누적 허용(launch: grasp_jump_max_xy)
-EIH_Z_UP_MAX          = 0.03  # [m] anchor보다 "위로" 허용하는 한계(launch: eih_z_up_max)
-# z 아래 방향은 기존 2중 장치를 그대로 쓴다:
-#   grasp_z_below_anchor_max(20mm)까지는 clamp로 따라가고, GRASP_Z_DROP_MAX(50mm)를
-#   넘게 낮으면 "떨어진 물체"로 보고 프레임 자체를 기각한다.
+PRE_REDETECT_MAX_XY   = 0.12  # [m] pre 구간 XY 누적 허용 (launch: redetect_max_xy)
+GRASP_JUMP_MAX_XY     = 0.15  # [m] grasp 구간 XY 누적 허용 (launch: grasp_jump_max_xy)
+EIH_Z_UP_MAX          = 0.03  # [m] anchor보다 위로 허용하는 한계 (launch: eih_z_up_max)
 
 # GRASP 하강 중 실시간 추종
-GRASP_CORR_ENABLED  = True   # 차체캠 델타보정 — 베이스가 움직이는 구성에서 그 드리프트를 따라감
+GRASP_CORR_ENABLED  = True   # 차체캠 델타보정 — 베이스가 움직이는 구성에서만 의미 있음
 GRASP_CORR_JUMP_MAX = 0.08   # [m] 직전 대비 점프가 이보다 크면 기각(마커 면 전환 방어)
-GRASP_EIH_TRACK_ENABLED = True   # 손목캠 재검출 — 하강 중에도 윗면 마커를 다시 재서 파지점 갱신
-GRASP_Z_DROP_MAX        = 0.05   # [m] 최초 검출보다 이보다 더 낮은 z는 "떨어진 물체"로 기각
-# 최초 검출(anchor)은 hover 높이의 원거리 관측이라 z가 높게 잡히기 쉽다 — 근접 재검출이
-# 그보다 낮다고 말하면 이 값까지는 따라 내려간다(0이면 예전처럼 anchor 아래로 안 감).
-GRASP_Z_BELOW_ANCHOR_MAX = 0.02  # [m] (launch: grasp_z_below_anchor_max)
+GRASP_EIH_TRACK_ENABLED = True   # 손목캠 재검출로 하강 중 파지점 갱신
+GRASP_Z_DROP_MAX        = 0.05   # [m] anchor보다 이만큼 낮은 z는 "떨어진 물체"로 기각
+GRASP_Z_BELOW_ANCHOR_MAX = 0.02  # [m] anchor 아래로 따라 내려갈 수 있는 한계 (launch: grasp_z_below_anchor_max)
 
-# place(선반에 내려놓기) — 마커 기반 정밀 배치(place_ready→hover→detect→descend, 아래
-# 그대로 보존)는 IK가 이상한 해로 계속 빠져 도킹 후 팔 자세 그대로 수직으로 살짝
-# 내리는 단순 경로(PLACE_LOWER_DIST)로 대체했다. 아래 상수는 그 보존된 경로가
-# 재활성화될 때를 위해 남겨둔다.
-PLACE_DETECT_TIMEOUT   = 900    # [스텝, 15s] 이 안에 상판 마커를 못 보면 도킹시 추정치로 진행
-PLACE_REDETECT_MAX     = 0.06   # [m] 1회 보정 상한(픽의 재검출 한계와 동일 근거)
-PLACE_Z_DROP_MAX        = 0.05  # [m] 최초 검출보다 낮은 z는 오검출로 기각(GRASP_Z_DROP_MAX 대응)
-# 관절 이동(SEARCH_Q 복귀)은 MOVE J라서 cartesian 단계들과 달리 도달 확인 수단이 없다 —
-# 시간으로만 기다린다. 5% 속도에서 SEARCH_Q까지는 큰 이동이라 아래 기본값(2.5~3초)은
-# 턱없이 짧다. step_confirm=true일 때는 사람이 Enter를 누를 때까지의 시간이 이 부족분을
-# 가려줬다 — 무인(step_confirm=false)에서는 그 여유가 사라지므로 실물 런치에서 늘린다.
-# (launch: place_home_settle_steps / place_ready_steps)
-PLACE_HOME_SETTLE_STEPS = 180   # [스텝, 3s] 초기 자세 복귀 후 정착 대기
-PLACE_READY_STEPS = 150         # [스텝, 2.5s] 중립 자세 복귀 대기
+# place — 마커 위에 그대로 놓으면 마커를 덮어 재검출이 끊기므로 비켜서 놓는다
+PLACE_DETECT_TIMEOUT   = 900    # [스텝, 15s] 이 안에 상판 마커를 못 보면 추정치로 진행
+PLACE_REDETECT_MAX     = 0.06   # [m] 1회 보정 상한
+PLACE_Z_DROP_MAX       = 0.05   # [m] anchor보다 이만큼 낮은 z는 오검출로 기각
+PLACE_HOME_SETTLE_STEPS = 180   # [스텝] 복귀 대기 — MOVE J는 도달 확인이 안 돼 시간으로만 (launch: 600)
+PLACE_READY_STEPS = 150         # [스텝] 중립 자세 복귀 대기 (launch: 600)
+PLACE_LOWER_DIST = 0.02         # [m] place_lower 경로의 수직 하강 거리
+PLACE_INSET_M       = 0.035   # [m] 마커 중심→놓는점 (마커 한 변과 같은 값)
+PLACE_RELEASE_GAP   = 0.005   # [m] 릴리즈 시 물체 바닥과 선반면 간격
+PLACE_RETREAT_DIST  = 0.05    # [m] 릴리즈 후 수직 후퇴 — 안 하면 손가락이 놓은 물체를 스친다
 
-PLACE_LOWER_DIST = 0.02         # [m] place_lock 시점 팔 자세에서 그리퍼를 수직으로 내리는 거리
+# place 놓는점 계산: place_point_mode = shelf_geom(선반 두께로 계산) | marker_inset(기본)
+# 비키는 방향: place_inset_mode = marker_y(기본, 마커 자신의 -Y) | body_y | radial
 
-# place 놓는점 계산 방식(place_point_mode)
-#   "shelf_geom":           선반 상판/보드 두께를 아는 경우 그 지오메트리로 계산
-#   "marker_inset"(기본):   마커 중심에서 PLACE_INSET_M만큼 비킨 지점에
-#                            놓는다. 물체를 마커 위에 그대로 올리면 (a)마커를 덮어버려
-#                            재검출이 끊기고 (b)쥔 물체가 마커 시야를 가린다. 마커 한 변
-#                            (34mm)만큼 당기면 마커 근접모서리 바로 바깥에 놓인다.
-# 당기는 방향은 place_inset_mode로 고른다:
-#   "marker_y"(실물 기본): 마커 자신의 -Y 방향. 마커를 선반에 비스듬히 붙여도 "마커
-#                           기준 앞쪽"이 그대로 따라간다(vision이 yaw를 같이 발행).
-#   "body_y":              body -Y(팔 베이스 쪽 정면) 고정.
-#   "radial":              body 원점→마커 수평방향의 반대(종전 동작).
-PLACE_INSET_M       = 0.035   # [m] 마커 중심→놓는점 거리 (마커 한 변 34mm와 같은 값)
-PLACE_RELEASE_GAP   = 0.005   # [m] 릴리즈 시 물체 바닥과 선반면 사이 간격
-PLACE_RETREAT_DIST  = 0.05    # [m] 릴리즈 후 수직 후퇴 거리(초기자세 복귀 전 물체를 안 건드리게)
-
-# _move_l()의 "도달"은 시간/거리 비율일 뿐 실제 팔 위치를 보장하지 않으므로,
-# ee_pose(실제 FK 위치)로 물리적 도달을 재확인한다(안 하면 하강 중 목표가 계속
-# 갱신될 때 "공중에서 헛집음"이 발생함— 실측 확인).
-PRE_ARRIVE_TOL = 0.010        # [m]
-# [스텝] 물리 도달 대기 상한. 저속 설정에서는 5초로 부족하다 — 상한을 넘기면
-# "그냥 진행"으로 빠져 덜 문 채로 그리퍼가 닫힌다. (launch: arrive_max_wait)
-PRE_ARRIVE_MAX_WAIT = 300     # [스텝, 5s]
-# [m] 도달 판정 허용오차. 이 값은 "여기까지 왔으면 그리퍼를 닫는다"는 뜻이라 곧바로
-# 파지 깊이 오차가 된다. 물체가 작을수록 좁혀야 한다 — 파지 깊이가 8mm인데 허용치가
-# 4mm면 절반이 날아간다.
-GRASP_ARRIVE_TOL = 0.004      # [m] 3D 거리 허용오차 (launch: grasp_arrive_tol)
-# z는 따로, 더 좁게 본다 — XY는 몇 mm 어긋나도 손가락 사이에 들어오지만 z가 덜 내려가면
-# 물체 윗모서리만 물게 된다. (launch: grasp_arrive_z_tol)
-GRASP_ARRIVE_Z_TOL = 0.002    # [m]
-GRASP_ARRIVE_MAX_WAIT = 300   # [스텝, 5s] grasp 단계 물리 도달 대기 상한(위와 같은 파라미터)
+# 물리 도달 확인 — _move_l의 done은 시간 기준이라 실제 팔 위치를 보장하지 않는다
+PRE_ARRIVE_TOL = 0.010        # [m] pre/hover/lift 도달 허용오차
+PRE_ARRIVE_MAX_WAIT = 300     # [스텝] 도달 대기 상한 — 넘기면 그냥 진행 (launch: arrive_max_wait, 900)
+GRASP_ARRIVE_TOL = 0.004      # [m] 3D 허용오차 — 곧 파지 깊이 오차다 (launch: grasp_arrive_tol)
+GRASP_ARRIVE_Z_TOL = 0.002    # [m] z는 더 좁게 — 덜 내려가면 윗모서리만 문다 (launch: grasp_arrive_z_tol)
+GRASP_ARRIVE_MAX_WAIT = 300   # [스텝] grasp 도달 대기 상한 (위와 같은 파라미터)
 
 LIFT_HEIGHT = 0.10       # [m] 파지 후 들어올릴 높이
 
 # ── 파지 성공/실패 판정 ─────────────────────────────────────────────────────
-# verify_mode 파라미터로 고른다.
-#   "gripper"(현재 기본): 그리퍼 개구부(스트로크)+접촉으로 판정. 카메라가 필요 없다.
-#   "chassis":            아래 차체캠 로직. 차체 카메라를 달면 그대로 되살아난다.
-#   "both":               그리퍼가 판정하고 차체캠 결과는 로그로만 남긴다(교차검증).
-#
-# [차체캠 방식] 리프트 완료 후 VERIFY_WINDOW_N 동안 지켜보며: 안 보임→성공(들려서
-# 화각 이탈), 보임+낮은 높이→실패, 보임+높은 높이→성공.
-# ★ 차체 카메라가 없는 구성에서 이 방식을 쓰면 안 된다. 관측이 0건이라 "미검출=성공"
-#   분기로 무조건 빠져서 헛집어도 성공으로 보고된다. 카메라를 달면 both로 먼저
-#   교차검증하고, 일치하면 chassis로 돌리거나 둘의 AND를 쓰면 된다.
-VERIFY_BASE_N     = 5     # 기준 높이를 만들 때 쓸 그립 직전 관측 수(중앙값 — 단발 튐 방어)
-VERIFY_WINDOW_N   = 90    # [스텝] 리프트 완료 후 관찰 시간(1.5초)
-VERIFY_LOW_BAND   = 0.02  # [m] 기준높이+이 값 이하면 "낮은 높이"(=바닥에 있다)
-VERIFY_LOW_HITS   = 2     # 낮은 높이 관측이 이만큼 쌓이면 실패 확정(단발 오검출 방어)
+# verify_mode = gripper(기본, 개구부로 판정) | chassis(차체캠) | both(교차검증)
+# ★ 차체 카메라가 없으면 chassis는 쓰면 안 된다 — 관측 0건이라 "미검출=성공"으로 빠진다
 
-# [그리퍼 방식 — 실물 기본] 물체를 물고 있으면 손가락이 물체 폭에서 멈춘다. 헛집으면
-# 손가락끼리 맞닿아 개구부가 0 근처로 내려간다 — 접촉력만으로는 이 둘을 구분 못 한다
-# (빈손이어도 손가락끼리 눌리면 접촉으로 잡힌다). 그래서 스트로크가 주 판정근거다.
-GRIP_VERIFY_WINDOW_N   = 60    # [스텝, 1s] 리프트 완료 후 그리퍼 상태 관찰 시간
-GRIP_VERIFY_MIN_SAMPLE = 10    # 이만큼은 받아야 판정한다(토픽 유실 방어)
-# ★ 보고되는 개구부는 "손가락 패드 사이 실제 간격"이 아니다. 패드 두께와 영점 설정
-# 때문에 상수만큼 크게 나온다 — 16.36mm 물체를 정상 파지했는데 25.9mm로 보고된 적이
-# 있다. 이 오프셋을 빼지 않으면 판정선이 통째로 어긋나 정상 파지를 실패로 읽는다.
-# 재는 법: 아무것도 없이 그리퍼를 닫고 그때 보고되는 개구부가 곧 이 값이다.
-GRIP_STROKE_OFFSET_MM  = 0.0   # [mm] 보고값 − 실제 간격 (launch: grip_stroke_offset_mm)
+# [차체캠 방식] 리프트 후 관찰: 안 보임→성공(화각 이탈), 낮은 높이→실패, 높은 위치→성공
+VERIFY_BASE_N     = 5     # 그립 직전 관측 수 — 중앙값으로 기준높이를 만든다(단발 튐 방어)
+VERIFY_WINDOW_N   = 90    # [스텝] 리프트 후 관찰 시간(1.5초)
+VERIFY_LOW_BAND   = 0.02  # [m] 기준높이+이 값 이하면 "바닥에 있다"
+VERIFY_LOW_HITS   = 2     # 낮은 높이 관측이 이만큼 쌓이면 실패 확정
+
+# [그리퍼 방식] 물체를 물면 손가락이 물체 폭에서 멈추고, 헛집으면 0 근처까지 닫힌다.
+# 접촉력만으로는 이 둘이 구분되지 않아(빈손도 손가락끼리 닿으면 접촉) 스트로크가 주 근거다.
+GRIP_VERIFY_WINDOW_N   = 60    # [스텝, 1s] 리프트 후 그리퍼 상태 관찰 시간
+GRIP_VERIFY_MIN_SAMPLE = 10    # 이만큼은 받아야 판정(토픽 유실 방어)
+GRIP_STROKE_OFFSET_MM  = 0.0   # [mm] 보고 개구부 − 실제 간격. 빈손으로 닫아 실측 (launch: 9.5)
 GRIP_STROKE_MIN_RATIO  = 0.50  # 물체 폭 대비 이 비율 밑이면 "사이에 아무것도 없다"
-GRIP_STROKE_MARGIN_MM  = 10.0  # [mm] 물체 폭+이 값보다 넓으면 "물체를 안 물었다"(덜 닫힘)
+GRIP_STROKE_MARGIN_MM  = 10.0  # [mm] 물체 폭+이 값보다 넓으면 "안 물었거나 덜 닫힘"
 GRIP_SLIP_DROP_MM      = 3.0   # [mm] 그립 직후 대비 이만큼 더 닫히면 리프트 중 놓친 것
 
 MAX_GRASP_RETRY = 2      # 헛집음 시 재상승→재진입 최대 횟수(0이면 재시도 안 함)

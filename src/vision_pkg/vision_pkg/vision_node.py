@@ -23,44 +23,28 @@ from step22_common import (
     _quat_to_R, pack_eih_marker,
 )
 
-# ArUco 마커 검출 노드. 카메라 두 계통을 한 파일에서 처리한다.
 #
 #   손목 카메라(eih) → 픽/플레이스 마커 → /vision/eih_marker_body, /vision/place_marker_body
 #   차체 카메라      → 물체 옆면·선반 전면 마커 → /vision/chassis_pose, /vision/place_pose
-#
-# ★ 현재 실기 구성에는 차체 카메라가 없다. 차체캠 경로(_on_chassis_image 등)는
-#   카메라를 장착했을 때 바로 되살려 손목캠 판정과 교차검증하려고 남겨둔 것이며,
-#   camera_info가 안 들어와 콜백 첫 줄에서 반환되므로 실행되지 않는다.
-# ── 사용자 조정 파라미터 ─────────────────────────────────────────────────────
 
-# [차체캠] 마커 포즈 채택 기준 — 되살릴 때 주석 해제
-# UP_MIN     = 0.80   # 마커 법선이 위를 향하는 정도의 하한 — 뒤집힌 해 방어
-# REPROJ_MAX = 3.0    # [px] 재투영 오차 상한
-# PLACE_REPROJ_MAX = 15.0   # [px] 선반 도킹용 — 셀 부조 때문에 근접 시 커지는 걸 감안해 완화
-# PLACE_PHI_ALPHA = 0.08    # 도킹 중 phi 안정화 EMA 계수
+# ── 파라미터 ─────────────────────────────────────────────────────
 
-EIH_PRINT_EVERY = 30   # [프레임] 손목캠 픽 마커 진단 출력 주기(15Hz → 약 2초)
+# [차체캠] 마커 포즈 채택 기준 
+# UP_MIN     = 0.80   # 마커  하한 
+# REPROJ_MAX = 3.0    #  재투영 오차 상한
+# PLACE_REPROJ_MAX = 15.0   #  place 도킹용
+# PLACE_PHI_ALPHA = 0.08    # 도킹 중 안정화 
 
-# 손목캠 재투영 게이트 — 차체캠의 REPROJ_MAX(3px)를 그대로 쓰면 안 된다. 손목캠은 0.1~0.2m
-# 근접 관측이라 같은 3D 정확도라도 마커가 화면에서 크고 px 오차가 그만큼 커진다(rep=7.4px
-# 실측). 그래서 "마커 한 변 길이 대비 비율"을 주 게이트로 쓰고, px 절대값은 명백한 쓰레기만
-# 거르는 상한으로만 둔다. 기각은 곧 "그 프레임 미검출"이라 팔은 직전 목표를 유지한다(안전측).
-# ★ 기본값은 일부러 "거의 안 거르는" 값이다. detect 단계에는 타임아웃이 없어서, 근거 없이
-# 조인 임계값이 모든 프레임을 기각하면 픽이 그 자리에서 멈춘다. 순서는 관측 먼저:
-#   1) 한 번 돌리고 [진단-eih] 로그의 rel(%)이 평소 얼마인지 본다(2초마다 찍힌다).
-#   2) 평소값의 약 2배로 max_rel을 내린다(예: 평소 1.5%면 0.03).
-#   3) 기각누적이 늘어나는데 파지가 멀쩡하면 더 조이고, 검출이 끊기면 되돌린다.
-# 참고: 34mm 마커·640x480·fx≈600이면 한 변이 0.1m에서 ≈200px, 0.2m에서 ≈100px이다.
-EIH_REPROJ_MAX_PX  = 30.0   # [px] 절대 상한 — 자세해가 완전히 깨진 프레임만 거른다
-EIH_REPROJ_MAX_REL = 0.20   # [-] rep / 마커 한 변 픽셀길이 — 스케일 불변 게이트(관측용 느슨값)
+EIH_PRINT_EVERY = 30   # 손목캠 픽 마커 진단 출력 주기(약 2초)
+EIH_REPROJ_MAX_PX  = 30.0   #  절대 상한 
+EIH_REPROJ_MAX_REL = 0.20   #  rep / 마커 한 변 픽셀길이 — 스케일 불변 게이트(관측용 느슨값)
 
 # ArUco 코너 정밀화
-CORNER_REFINE = "subpix"   # "subpix"(정밀) 또는 "none"(빠름)
+CORNER_REFINE = "subpix"   # "subpix"(정밀) "none"(빠름)
 CORNER_REFINE_WIN  = 5
 CORNER_REFINE_ITER = 50
 CORNER_REFINE_ACC  = 0.01
 
-# ── 조정 파라미터 끝 ─────────────────────────────────────────────────────────
 
 _LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 

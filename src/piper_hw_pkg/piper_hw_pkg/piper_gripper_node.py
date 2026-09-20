@@ -13,36 +13,20 @@ from std_msgs.msg import Float32MultiArray, Bool, String, Int32
 
 from step22_common import pack_grip_state
 
-# 그리퍼 α-SMC 힘제어.
-#
-# PiPER 그리퍼는 힘을 직접 지령할 수 없고 개구부(위치)만 받는다. 그래서 펌웨어가
-# 주는 토크 피드백을 보며 지령 개구부를 조절하는 외루프를 건다. 제어 변수 α는
-# "닫힘 정도"이고 개구부로 선형 사상된다 — _publish_target() 참고.
-#
-# I/O는 piper_driver_node가 중계한다(/piper/gripper_feedback, /piper/gripper_target_cmd).
-# ── 사용자 조정 파라미터 ─────────────────────────────────────────────────────
+GRIPPER_STROKE_MAX_M = 0.06  # 그리퍼 오픈 최대 
 
-GRIPPER_STROKE_MAX_M = 0.06  # [m] 완전히 열렸을 때 목표 개구부(펌웨어 최대치 70mm 이내)
-
-# ★ 아래 SMC 상수는 아직 실측 기반이 아니다. 현재 타겟(16.36mm 큐브)에서 목표 토크에
-# 수렴하고 놓치지도 않는 것은 확인했으나, 물체 재질이나 무게가 바뀌면 재튜닝해야 한다.
-# 펌웨어가 grippers_effort를 어떻게 산출하는지 공개돼 있지 않아 절대 파지력과의
-# 대응도 모른다 — 정확한 파지력이 필요하면 로드셀로 한 번 대조할 것.
 SMC_ENABLED   = True
-SMC_F_TARGET  = 1.5     # [N·m] TODO(실측 필요) 목표 토크 — 그리퍼 최대(5N·m) 대비 자리표시자
-SMC_PHI       = 0.5     # [N·m] TODO(실측 필요) 경계층
-SMC_ALPHA_0   = 0.0     # 완전히 열린 상태에서 닫기 시작 — 0.5면 30mm에서 시작해 물체를 못 감싼다
-SMC_K_A       = 0.01    # [α/스텝] TODO(실측 필요) SMC 게인 — 그리퍼가 뻣뻣해 작게 잡아야 안정
+SMC_F_TARGET  = 1.5     # [N·m] 목표 토크 
+SMC_PHI       = 0.5     # [N·m] 경계층
+SMC_ALPHA_0   = 0.0     # 완전히 열린 상태
+SMC_K_A       = 0.01    # SMC 게인 
 SMC_A_RATE    = 0.01
-SMC_A_MIN     = 0.30    # α 하한 — 개구부가 물체 크기 밑으로 안 벌어지게(물체 크기에 맞게 재조정 필요)
-SMC_A_MAX     = 1.00
-GRIP_CLOSE_SCALE = 0.50  # SMC_ENABLED=False일 때 쓰는 고정 α
+SMC_A_MIN     = 0.30    # α 하한 
+SMC_A_MAX     = 1.00    # α 상한 
+GRIP_CLOSE_SCALE = 0.50  # SMC_ENABLED=False일 때 고정 α
+GRIPPER_EFFORT_LIMIT_NM = 2.0  # [N·m] TODO(실측 필요) 안전 상한
 
-# 실물 GripperCtrl의 effort_limit(하드웨어 토크 상한) — SMC 출력(각도)과 별개로 걸어두는
-# 안전 상한. SMC가 각도를 잘못 밀어붙여도 이 값을 넘는 토크는 펌웨어가 자체적으로 컷한다.
-GRIPPER_EFFORT_LIMIT_NM = 2.0  # [N·m] TODO(실측 필요)
-
-CONTACT_F_MIN       = 0.3   # [N·m] TODO(실측 필요) 이 토크 이상이면 "닿았다"
+CONTACT_F_MIN       = 0.3   # [N·m] 감지 토크 
 GRIP_JUDGE_BY_FORCE = True
 GRIP_WARMUP_N       = 2
 GRIP_F_CONTACT_N    = 5
@@ -204,8 +188,6 @@ def main():
         pass
     finally:
         node.destroy_node()
-        # launch가 SIGINT를 보내면 rclpy 시그널 핸들러가 이미 컨텍스트를 내려서
-        # 여기서 또 부르면 RCLError를 뱉는다(동작엔 영향 없지만 매번 traceback).
         if rclpy.ok():
             rclpy.shutdown()
 
