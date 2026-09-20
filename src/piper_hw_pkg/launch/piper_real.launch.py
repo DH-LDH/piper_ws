@@ -14,7 +14,6 @@ def generate_launch_description():
     robot_description = ParameterValue(Command(["xacro ", xacro_path]), value_type=str)
 
     really_enable = LaunchConfiguration("really_enable")
-    use_marker_place = LaunchConfiguration("use_marker_place")
     can_name = LaunchConfiguration("can_name")
     move_spd_rate_ctrl = LaunchConfiguration("move_spd_rate_ctrl")
     eih_pick_marker_id = LaunchConfiguration("eih_pick_marker_id")
@@ -31,8 +30,6 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("really_enable", default_value="false",
                               description="true여야 실제로 EnableArm/모션 명령을 보낸다"),
-        DeclareLaunchArgument("use_marker_place", default_value="true",
-                              description="두 번째 아르코 마커로 place 위치 인식(v1 기본)"),
         DeclareLaunchArgument("can_name", default_value="can_piper"),  # udev로 고정한 이름 — can0/can1은 부팅마다 순서 바뀜
         DeclareLaunchArgument("move_spd_rate_ctrl", default_value="5"),  # [%]
         DeclareLaunchArgument("eih_pick_marker_id", default_value="0"),  # 실물 픽 타겟 마커 ID
@@ -111,7 +108,6 @@ def generate_launch_description():
         DeclareLaunchArgument("grip_stroke_offset_mm", default_value="9.5"),
         # place — 마커 중심에서 팔 베이스 쪽으로 한 변(34mm) 당긴 곳에 놓는다(마커를
         # 덮지 않게). 릴리즈는 물체 바닥이 선반면에서 5mm 뜬 높이에서.
-        DeclareLaunchArgument("place_point_mode", default_value="marker_inset"),
         DeclareLaunchArgument("place_inset_m", default_value="0.035"),
         # 당기는 방향: marker_y=마커 자신의 -Y(마커를 비스듬히 붙여도 따라감),
         # body_y=팔 베이스 정면(-Y) 고정, radial=원점→마커 반대방향(종전).
@@ -179,7 +175,7 @@ def generate_launch_description():
              condition=IfCondition(debug_view), output="screen"),
         Node(package="control_pkg", executable="arm_node",
              condition=IfCondition(arm),
-             parameters=[{"use_marker_place": use_marker_place, "body_link_world_z": 0.0,
+             parameters=[{"body_link_world_z": 0.0,
                           "obj_expected_x_body": obj_expected_x_body,
                           "obj_expected_y_body": obj_expected_y_body,
                           "obj_expected_z_body": obj_expected_z_body,
@@ -207,7 +203,6 @@ def generate_launch_description():
                           "obj_width_m": LaunchConfiguration("obj_width_m"),
                           "obj_height_m": LaunchConfiguration("obj_height_m"),
                           "grip_stroke_offset_mm": LaunchConfiguration("grip_stroke_offset_mm"),
-                          "place_point_mode": LaunchConfiguration("place_point_mode"),
                           "place_inset_m": LaunchConfiguration("place_inset_m"),
                           "place_inset_mode": LaunchConfiguration("place_inset_mode"),
                           "place_release_gap": LaunchConfiguration("place_release_gap"),
