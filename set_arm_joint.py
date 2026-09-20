@@ -13,6 +13,8 @@
 #   python3 set_arm_joint.py 0 45 -90 0 45 0
 # =============================================================================
 import sys
+import time
+
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -32,10 +34,19 @@ def main():
     # TRANSIENT_LOCAL: plant_node가 이 노드보다 늦게/먼저 떠도 마지막 값을 받는다
     latch = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
     pub = node.create_publisher(Float32MultiArray, "/arm/joint_hold_target", latch)
-    rclpy.spin_once(node, timeout_sec=0.5)  # 디스커버리 대기
+    # 구독자(driver/plant)와 매칭될 때까지 기다린다 — 바로 publish하고 종료하면
+    # 디스커버리가 늦은 경우 메시지가 통째로 사라져서 팔이 안 움직인다.
+    deadline = time.time() + 5.0
+    while pub.get_subscription_count() == 0 and time.time() < deadline:
+        rclpy.spin_once(node, timeout_sec=0.1)
+    if pub.get_subscription_count() == 0:
+        print("  ★ /arm/joint_hold_target 구독자가 없습니다 — driver(또는 plant)가 떠 있는지 확인할 것")
+        node.destroy_node(); rclpy.shutdown(); sys.exit(2)
     pub.publish(Float32MultiArray(data=[float(v) for v in q6_rad]))
-    rclpy.spin_once(node, timeout_sec=0.3)  # publish 실제 전송 대기
-    print(f"  → /arm/joint_hold_target publish: {q6_deg} deg = {q6_rad.round(3).tolist()} rad")
+    for _ in range(5):
+        rclpy.spin_once(node, timeout_sec=0.1)  # publish 실제 전송 대기
+    print(f"  → /arm/joint_hold_target publish ({pub.get_subscription_count()}개 구독자): "
+          f"{q6_deg} deg = {q6_rad.round(3).tolist()} rad")
     node.destroy_node()
     rclpy.shutdown()
 

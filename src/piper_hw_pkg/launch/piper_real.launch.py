@@ -1,5 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, Command
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -7,32 +8,115 @@ from ament_index_python.packages import get_package_share_directory
 
 
 def generate_launch_description():
-    xacro_path = get_package_share_directory("piper_hw_pkg") + "/urdf/eih_cam_mount.xacro"
+    # 손목캠 TCP 오프셋은 xacro가 아니라 piper_eih_camera_node의 cam_tcp_offset_* 파라미터가 담당 —
+    # 여기선 팔 자체의 링크 체인(link1..link6, robot_state_publisher가 joint_states로 갱신)만 필요.
+    xacro_path = get_package_share_directory("piper_description") + "/urdf/piper_description.xacro"
     robot_description = ParameterValue(Command(["xacro ", xacro_path]), value_type=str)
 
     really_enable = LaunchConfiguration("really_enable")
     use_marker_place = LaunchConfiguration("use_marker_place")
     can_name = LaunchConfiguration("can_name")
+    move_spd_rate_ctrl = LaunchConfiguration("move_spd_rate_ctrl")
+    eih_pick_marker_id = LaunchConfiguration("eih_pick_marker_id")
+    eih_pick_marker_size_m = LaunchConfiguration("eih_pick_marker_size_m")
+    obj_expected_x_body = LaunchConfiguration("obj_expected_x_body")
+    obj_expected_y_body = LaunchConfiguration("obj_expected_y_body")
+    obj_expected_z_body = LaunchConfiguration("obj_expected_z_body")
+    step_confirm = LaunchConfiguration("step_confirm")
+    eih_y_flip = LaunchConfiguration("eih_y_flip")
+    corner_refine = LaunchConfiguration("corner_refine")
+    debug_view = LaunchConfiguration("debug_view")
+    arm = LaunchConfiguration("arm")
+    debug_view_topic = LaunchConfiguration("debug_view_topic")
 
     return LaunchDescription([
         DeclareLaunchArgument("really_enable", default_value="false",
                               description="true여야 실제로 EnableArm/모션 명령을 보낸다"),
         DeclareLaunchArgument("use_marker_place", default_value="true",
                               description="두 번째 아르코 마커로 place 위치 인식(v1 기본)"),
-        DeclareLaunchArgument("can_name", default_value="can0"),
+        DeclareLaunchArgument("can_name", default_value="can_piper"),  # udev로 고정한 이름 — can0/can1은 부팅마다 순서 바뀜
+        DeclareLaunchArgument("move_spd_rate_ctrl", default_value="5"),  # [%]
+        DeclareLaunchArgument("eih_pick_marker_id", default_value="0"),  # 실물 픽 타겟 마커 ID
+        DeclareLaunchArgument("eih_pick_marker_size_m", default_value="0.034"),
+        # 손목캠 외부파라미터(link6→eih_cam) — eih_cam_calib.py가 뽑아주는 값.
+        DeclareLaunchArgument("cam_tcp_offset_x", default_value="-0.085"),
+        DeclareLaunchArgument("cam_tcp_offset_y", default_value="-0.010"),
+        DeclareLaunchArgument("cam_tcp_offset_z", default_value="0.026"),
+        DeclareLaunchArgument("cam_tcp_offset_pitch_deg", default_value="27.5"),
+        DeclareLaunchArgument("cam_tcp_offset_roll_deg", default_value="-90.0"),
+        # hover가 처음 향할 "물체 대략 위치"(body_link=팔 베이스 기준) — 실측해서 바꿀 것.
+        # z 기본값은 2026-09-17 실측(팔 베이스 지면 38cm, 물체 지면 25cm → -0.13m).
+        DeclareLaunchArgument("obj_expected_x_body", default_value="0.0"),
+        DeclareLaunchArgument("obj_expected_y_body", default_value="0.40"),  # 2026-09-17 실측
+        DeclareLaunchArgument("obj_expected_z_body", default_value="-0.13"),
+        # "EndPoseCtrl 명령 기준점 → 손끝" 거리. 물리적 손가락 길이가 아니라 펌웨어 EndPose
+        # 기준점과 URDF link6 원점의 불일치까지 합친 값이라, joint7 장착점(135.8mm)보다
+        # 짧은 게 정상이다. 2026-09-18 실기 확정 — 물체 높이를 바꿔가며 상수임을 확인.
+        DeclareLaunchArgument("ee_grip_offset", default_value="0.121"),
+        # 파지 깊이/접근 기하 — 물체가 안 잡히면 여기부터 만진다(arm_node.py 상수와 같은 기본값).
+        DeclareLaunchArgument("approach_dist", default_value="0.05"),        # [m] pre 대기 높이
+        # [m] 마커면(물체 윗면)보다 더 내려가는 깊이 = 물체 높이/2가 기준. 오차 보정용이
+        # 아니라 "얼마나 깊이 물지" 설계값이므로 물체가 바뀌면 같이 바꿀 것.
+        DeclareLaunchArgument("grasp_depth_extra", default_value="0.008"),   # 현재 타겟 16.36mm 큐브
+        # 근접 재검출이 "더 낮다"고 할 때 최초 검출(hover 원거리 관측)보다 아래로 허용하는 한계.
+        DeclareLaunchArgument("grasp_z_below_anchor_max", default_value="0.02"),
+        # 캘리브레이션 중엔 false로 — detect 시점 파지점을 고정해서 팔 거동을 결정적으로 만든다.
+        DeclareLaunchArgument("pre_redetect", default_value="true"),
+        DeclareLaunchArgument("grasp_eih_track", default_value="true"),
+        DeclareLaunchArgument("step_confirm", default_value="false",
+                              description="true면 phase 전환마다 멈추고 step_confirm.py의 Enter 대기"),
+        DeclareLaunchArgument("eih_y_flip", default_value="false"),  # 손목캠 좌우(Y) 부호 반전 테스트용
+        DeclareLaunchArgument("corner_refine", default_value="subpix"),  # "subpix" 또는 "none"
+        # 손목캠 검출 확인용 창 — vision_node가 실제로 쓰는 검출/포즈를 그대로 그린다
+        # (별도 eih_marker_debug_node는 자체 검출이라 파이프라인 값과 다를 수 있음).
+        # false면 arm_node를 안 띄운다 — driver가 phase를 'wait'로 유지해서
+        # set_arm_joint.py로 관절을 직접 지령할 수 있다(캘리브레이션용).
+        DeclareLaunchArgument("arm", default_value="true"),
+        DeclareLaunchArgument("debug_view", default_value="true",
+                              description="true면 rqt_image_view를 같이 띄운다"),
+        # 원본 프레임만 보고 싶으면 /vision/eih_image(카메라 노드가 그대로 발행하는 것)로 바꿀 것.
+        DeclareLaunchArgument("debug_view_topic", default_value="/vision/eih_debug_image"),
 
         Node(package="robot_state_publisher", executable="robot_state_publisher",
              parameters=[{"robot_description": robot_description}]),
 
         Node(package="piper_hw_pkg", executable="piper_driver_node",
-             parameters=[{"really_enable": really_enable, "can_name": can_name}],
+             parameters=[{"really_enable": really_enable, "can_name": can_name,
+                          "move_spd_rate_ctrl": move_spd_rate_ctrl}],
              output="screen"),
         Node(package="piper_hw_pkg", executable="piper_gripper_node", output="screen"),
-        Node(package="piper_hw_pkg", executable="piper_eih_camera_node", output="screen"),
+        Node(package="piper_hw_pkg", executable="piper_eih_camera_node",
+             parameters=[{"cam_tcp_offset_x": LaunchConfiguration("cam_tcp_offset_x"),
+                          "cam_tcp_offset_y": LaunchConfiguration("cam_tcp_offset_y"),
+                          "cam_tcp_offset_z": LaunchConfiguration("cam_tcp_offset_z"),
+                          "cam_tcp_offset_pitch_deg": LaunchConfiguration("cam_tcp_offset_pitch_deg"),
+                          "cam_tcp_offset_roll_deg": LaunchConfiguration("cam_tcp_offset_roll_deg")}],
+             output="screen"),
         Node(package="piper_hw_pkg", executable="piper_fake_amr_node", output="screen"),
 
-        Node(package="vision_pkg", executable="vision_node", output="screen"),
+        Node(package="vision_pkg", executable="vision_node",
+             parameters=[{"eih_pick_marker_id": eih_pick_marker_id,
+                          "eih_pick_marker_size_m": eih_pick_marker_size_m,
+                          "eih_axis_flip": False,
+                          "eih_y_flip": eih_y_flip,
+                          "corner_refine": corner_refine,
+                          "eih_debug_view": debug_view}],
+             output="screen"),
+        Node(package="rqt_image_view", executable="rqt_image_view",
+             arguments=[debug_view_topic],
+             condition=IfCondition(debug_view), output="screen"),
         Node(package="control_pkg", executable="arm_node",
-             parameters=[{"use_marker_place": use_marker_place}],
+             condition=IfCondition(arm),
+             parameters=[{"use_marker_place": use_marker_place, "body_link_world_z": 0.0,
+                          "obj_expected_x_body": obj_expected_x_body,
+                          "obj_expected_y_body": obj_expected_y_body,
+                          "obj_expected_z_body": obj_expected_z_body,
+                          "ee_grip_offset": LaunchConfiguration("ee_grip_offset"),
+                          "approach_dist": LaunchConfiguration("approach_dist"),
+                          "grasp_depth_extra": LaunchConfiguration("grasp_depth_extra"),
+                          "grasp_z_below_anchor_max": LaunchConfiguration("grasp_z_below_anchor_max"),
+                          "pre_redetect": LaunchConfiguration("pre_redetect"),
+                          "grasp_eih_track": LaunchConfiguration("grasp_eih_track"),
+                          "step_confirm": step_confirm}],
              output="screen"),
     ])

@@ -5,76 +5,169 @@ try:
 except Exception:
     pass
 
+import array
+import math
+import threading
+
 import cv2
+import numpy as np
+import pyrealsense2 as rs
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo
+from geometry_msgs.msg import TransformStamped
+from tf2_ros import StaticTransformBroadcaster
+from rcl_interfaces.msg import SetParametersResult
 
-# 실물 손목캠(eih) 소스 — 프레임을 잡아 /vision/eih_image로 그대로 발행한다.
-# vision_node.py는 무수정 — _img_to_gray()가 4채널(RGBA) 프레임을 기대하므로(vision_node.py:77)
-# 여기서 BGR→RGBA 변환만 맞춰준다.
+# 실물 손목캠(eih) 소스: RealSense D455 컬러 스트림 → /vision/eih_image 발행.
 
 _LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
-CAMERA_DEVICE = 0     # TODO(실측/장치 확인 필요) — /dev/video0 등, 필요시 ROS 파라미터로 덮어쓰기
-FRAME_WIDTH, FRAME_HEIGHT = 640, 480
+FRAME_WIDTH, FRAME_HEIGHT, FRAME_FPS = 640, 480, 30
 PUBLISH_HZ = 15.0
 
-# 카메라 내부파라미터 — TODO(캘리브레이션 필요): 체스보드/차트 캘리브레이션 결과로 갱신할 것.
-# 지금은 "핀홀 근사 + 화면 중앙 주점" 자리표시자일 뿐이라 실제 solvePnP 정확도를 보장 못 한다.
-_FOCAL_PLACEHOLDER_PX = 500.0
-K_PLACEHOLDER = [
-    _FOCAL_PLACEHOLDER_PX, 0.0, FRAME_WIDTH / 2.0,
-    0.0, _FOCAL_PLACEHOLDER_PX, FRAME_HEIGHT / 2.0,
-    0.0, 0.0, 1.0,
-]
+CAM_TCP_OFFSET_X_DEFAULT = -0.085          # [m] 상하
+CAM_TCP_OFFSET_Y_DEFAULT = -0.01           # [m] 좌우
+CAM_TCP_OFFSET_Z_DEFAULT = 0.026           # [m] 앞뒤
+# 2026-09-18 eih_cam_calib.py로 확정(9자세, 자세간 편차 10.4mm→3.8mm). 전자각도계로 쟀던
+# 40.0은 12.5도 틀렸고, 그 오차가 거리에 비례하는 지향 오차로 나타나 파지가 계속 빗나갔다.
+CAM_TCP_OFFSET_PITCH_DEG_DEFAULT = 27.5    # [deg] 틸트(link6 y축 회전)
+CAM_TCP_OFFSET_ROLL_DEG_DEFAULT = -90.0    # [deg] 광축 롤 — 카메라 이미지 좌우를 로봇 좌우에 맞춤
 
 
 class PiperEihCameraNode(Node):
     def __init__(self):
         super().__init__("piper_eih_camera_node")
 
-        self.declare_parameter("device", CAMERA_DEVICE)
-        device = self.get_parameter("device").value
-        self.cap = cv2.VideoCapture(device)
-        if not self.cap.isOpened():
-            self.get_logger().error(f"카메라 장치 열기 실패(device={device}) — /vision/eih_image 발행 안 됨")
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+        self._latest_rgba = None
+        self._latest_lock = threading.Lock()
+        self._stop_capture = threading.Event()
+        self._capture_thread = None
+
+        self.declare_parameter("cam_tcp_offset_x", CAM_TCP_OFFSET_X_DEFAULT)
+        self.declare_parameter("cam_tcp_offset_y", CAM_TCP_OFFSET_Y_DEFAULT)
+        self.declare_parameter("cam_tcp_offset_z", CAM_TCP_OFFSET_Z_DEFAULT)
+        self.declare_parameter("cam_tcp_offset_pitch_deg", CAM_TCP_OFFSET_PITCH_DEG_DEFAULT)
+        self.declare_parameter("cam_tcp_offset_roll_deg", CAM_TCP_OFFSET_ROLL_DEG_DEFAULT)
+        self.tf_static = StaticTransformBroadcaster(self)
+        self._publish_cam_tcp_tf()
+        self.add_on_set_parameters_callback(self._on_cam_tcp_params_set)
+
+        self.pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_stream(rs.stream.color, FRAME_WIDTH, FRAME_HEIGHT, rs.format.bgr8, FRAME_FPS)
+        try:
+            profile = self.pipeline.start(config)
+        except RuntimeError as e:
+            self.get_logger().error(f"RealSense 파이프라인 시작 실패: {e} — /vision/eih_image 발행 안 됨")
+            self.pipeline = None
+            self.map1 = self.map2 = None
+        else:
+            intr = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+            K = np.array([[intr.fx, 0.0, intr.ppx],
+                          [0.0, intr.fy, intr.ppy],
+                          [0.0, 0.0, 1.0]])
+            D = np.array(intr.coeffs)
+            # vision_node.py는 왜곡계수 없이 K만 쓰므로 여기서 미리 undistort해둔다.
+            self.map1, self.map2 = cv2.initUndistortRectifyMap(
+                K, D, None, K, (FRAME_WIDTH, FRAME_HEIGHT), cv2.CV_16SC2)
+
+            self.pub_info = self.create_publisher(CameraInfo, "/vision/eih_camera_info", _LATCH)
+            info = CameraInfo()
+            info.width, info.height = FRAME_WIDTH, FRAME_HEIGHT
+            info.k = K.flatten().tolist()
+            info.d = [0.0] * 5  # 아래에서 undistort된 프레임을 발행하므로 발행 이미지 기준 왜곡 없음
+            self.pub_info.publish(info)
+            self.get_logger().info(
+                f"RealSense 팩토리 캘리브레이션 적용: fx={intr.fx:.1f} fy={intr.fy:.1f} "
+                f"ppx={intr.ppx:.1f} ppy={intr.ppy:.1f}")
 
         self.pub_image = self.create_publisher(Image, "/vision/eih_image", 5)
-        self.pub_info = self.create_publisher(CameraInfo, "/vision/eih_camera_info", _LATCH)
 
-        info = CameraInfo()
-        info.width, info.height = FRAME_WIDTH, FRAME_HEIGHT
-        info.k = K_PLACEHOLDER
-        self.pub_info.publish(info)
-        self.get_logger().warn(
-            "카메라 내부파라미터가 자리표시자입니다 — 실제 캘리브레이션 전까지 마커 pose 정확도 보장 안 됨")
+        if self.pipeline is not None:
+            # 캡처는 별도 스레드에서: RealSense I/O가 executor를 막지 않게.
+            self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+            self._capture_thread.start()
 
         self.create_timer(1.0 / PUBLISH_HZ, self._on_timer)
-        self.get_logger().info(f"piper_eih_camera_node 초기화 완료 (device={device})")
+        self.get_logger().info("piper_eih_camera_node 초기화 완료 (RealSense D455)")
+
+    def _publish_cam_tcp_tf(self, x=None, y=None, z=None, pitch_deg=None, roll_deg=None):
+        x = float(self.get_parameter("cam_tcp_offset_x").value) if x is None else x
+        y = float(self.get_parameter("cam_tcp_offset_y").value) if y is None else y
+        z = float(self.get_parameter("cam_tcp_offset_z").value) if z is None else z
+        if pitch_deg is None:
+            pitch_deg = float(self.get_parameter("cam_tcp_offset_pitch_deg").value)
+        if roll_deg is None:
+            roll_deg = float(self.get_parameter("cam_tcp_offset_roll_deg").value)
+        # R = Ry(pitch) @ Rz(roll) — 틸트 후 광축 롤(카메라 이미지 좌우↔로봇 좌우 정렬)
+        cp, sp = math.cos(math.radians(pitch_deg) / 2.0), math.sin(math.radians(pitch_deg) / 2.0)
+        cr, sr = math.cos(math.radians(roll_deg) / 2.0), math.sin(math.radians(roll_deg) / 2.0)
+        w, qx, qy, qz = cp * cr, sp * sr, sp * cr, cp * sr
+
+        tf = TransformStamped()
+        tf.header.stamp = self.get_clock().now().to_msg()
+        tf.header.frame_id = "link6"
+        tf.child_frame_id = "eih_cam"
+        tf.transform.translation.x = x
+        tf.transform.translation.y = y
+        tf.transform.translation.z = z
+        tf.transform.rotation.x = qx
+        tf.transform.rotation.y = qy
+        tf.transform.rotation.z = qz
+        tf.transform.rotation.w = w
+        self.tf_static.sendTransform(tf)
+        self.get_logger().info(
+            f"link6→eih_cam TF 발행: xyz=({x:.3f},{y:.3f},{z:.3f}) "
+            f"pitch={pitch_deg:.1f}deg roll={roll_deg:.1f}deg")
+
+    def _on_cam_tcp_params_set(self, params):
+        # get_parameter는 아직 옛값이라 변경분은 params에서 직접 읽는다.
+        overrides = {p.name: p.value for p in params}
+        self._publish_cam_tcp_tf(
+            x=overrides.get("cam_tcp_offset_x"),
+            y=overrides.get("cam_tcp_offset_y"),
+            z=overrides.get("cam_tcp_offset_z"),
+            pitch_deg=overrides.get("cam_tcp_offset_pitch_deg"),
+            roll_deg=overrides.get("cam_tcp_offset_roll_deg"))
+        return SetParametersResult(successful=True)
+
+    def _capture_loop(self):
+        while not self._stop_capture.is_set():
+            try:
+                frames = self.pipeline.wait_for_frames(1000)
+            except RuntimeError:
+                continue
+            color = frames.get_color_frame()
+            if not color:
+                continue
+            frame_bgr = np.asanyarray(color.get_data())
+            frame_bgr = cv2.remap(frame_bgr, self.map1, self.map2, cv2.INTER_LINEAR)
+            rgba = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGBA)
+            with self._latest_lock:
+                self._latest_rgba = rgba
 
     def _on_timer(self):
-        if not self.cap.isOpened():
+        with self._latest_lock:
+            rgba = self._latest_rgba
+        if rgba is None:
             return
-        ok, frame_bgr = self.cap.read()
-        if not ok:
-            return
-        rgba = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGBA)
         msg = Image()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.height, msg.width = rgba.shape[0], rgba.shape[1]
         msg.encoding = "rgba8"
         msg.step = msg.width * 4
-        msg.data = rgba.tobytes()
+        msg.data = array.array("B", rgba.tobytes())  # bytes 그대로 넣으면 publish()가 ~200ms로 느려짐
         self.pub_image.publish(msg)
 
     def destroy_node(self):
-        if self.cap is not None:
-            self.cap.release()
+        self._stop_capture.set()
+        if self._capture_thread is not None:
+            self._capture_thread.join(timeout=2.0)
+        if self.pipeline is not None:
+            self.pipeline.stop()
         super().destroy_node()
 
 

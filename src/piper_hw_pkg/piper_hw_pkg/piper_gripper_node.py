@@ -15,14 +15,14 @@ from std_msgs.msg import Float32MultiArray, Bool, String, Int32
 # I/O만 실물(piper_driver_node가 중계하는 /piper/gripper_feedback·target_cmd)로 교체한 버전.
 # ── 사용자 조정 파라미터 ─────────────────────────────────────────────────────
 
-GRIPPER_STROKE_MAX_M = 0.07  # [m] 실물 그리퍼 최대 개구부 — TODO(실측 필요): 공식 스펙/실측으로 갱신
+GRIPPER_STROKE_MAX_M = 0.06  # [m] 완전히 열렸을 때 목표 개구부(펌웨어 최대치 70mm 이내)
 
 # α-SMC — 단위만 N(sim)→N·m(실물)로 바뀜. 목표 토크/경계층 등은 전부 자리표시자이며
 # 실물에서 grippers_effort 실측값을 보며 재튜닝해야 한다(sim 값을 그대로 옮길 근거 없음).
 SMC_ENABLED   = True
 SMC_F_TARGET  = 1.5     # [N·m] TODO(실측 필요) 목표 토크 — 그리퍼 최대(5N·m) 대비 자리표시자
 SMC_PHI       = 0.5     # [N·m] TODO(실측 필요) 경계층
-SMC_ALPHA_0   = 0.50
+SMC_ALPHA_0   = 0.0     # 2026-09-17: 완전히 열린 상태에서 닫기 시작(0.5면 30mm에서 시작해 물체를 못 감쌈)
 SMC_K_A       = 0.01    # [α/스텝] TODO(실측 필요) — sim 값(0.001)은 N 단위 전제라 그대로 못 씀
 SMC_A_RATE    = 0.01
 SMC_A_MIN     = 0.30    # α 하한 — 개구부가 물체 크기 밑으로 안 벌어지게(물체 크기에 맞게 재조정 필요)
@@ -69,11 +69,19 @@ class PiperGripperNode(Node):
         self.create_subscription(Bool, "/gripper/cmd", self._on_gripper_cmd, 1)
         self.create_subscription(Int32, "/plant/tick", self._tick, 20)
         self.create_timer(2.0, self._publish_status)
+        # 기동 시 한 번 열어둔다 — 안 하면 이전 파지에서 닫힌 상태로 시작한다.
+        self._open_timer = self.create_timer(3.0, self._open_on_startup)
         self.get_logger().info("piper_gripper_node 초기화 완료 — /gripper/cmd 대기")
+
+    def _open_on_startup(self):
+        self._open_timer.cancel()
+        self.grip_alpha = 0.0
+        self._publish_target(0.0)
+        self.get_logger().info("기동 시 그리퍼 오픈")
 
     def _on_feedback(self, msg: Float32MultiArray):
         _angle_mm, effort_nm, foc = msg.data
-        self.F_con = float(effort_nm)
+        self.F_con = abs(float(effort_nm))  # 닫는 방향 저항은 음수로 들어옴(2026-09-17 실기 확인) — 크기만 사용
         self.foc_status = int(foc)
 
     def _publish_target(self, alpha):

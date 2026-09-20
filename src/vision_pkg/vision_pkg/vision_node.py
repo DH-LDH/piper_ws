@@ -5,6 +5,7 @@ try:
 except Exception:
     pass
 
+import array
 import math
 import numpy as np
 import cv2
@@ -18,7 +19,7 @@ from sensor_msgs.msg import Image, CameraInfo
 import tf2_ros
 
 from step22_common import (
-    OBJ_PTS, TOP_PTS, TOP_MARKER_ID,
+    OBJ_PTS, TOP_PTS, TOP_MARKER_ID, TOP_MARKER_SIZE,
     PLACE_SIDE_MARKER_ID, PLACE_TOP_MARKER_ID, MK_SHELF_FRONT_OFFSET, SHELF_FRONT_PTS,
     SHELF_FAR_MARKER_Z, SHELF_NEAR_MARKER_Z, PLACE_NEAR_MARKER_ID, PLACE_NEAR_PTS,
     SHELF_FAR_MARKER_X, SHELF_NEAR_MARKER_X,
@@ -35,6 +36,8 @@ REPROJ_MAX = 3.0    # [px] 재투영 오차 상한 — 이보다 크면 오검�
 PLACE_REPROJ_MAX = 15.0   # [px] 선반 도킹용 재투영 오차 상한 — 셀 부조 때문에 근접 시 커지는 걸 감안해 픽보다 완화
 PLACE_PHI_ALPHA = 0.08    # 도킹 중 phi(선반 방향) 안정화 EMA 계수 — 작을수록 평면마커 자세 모호성에 안 흔들림
 
+EIH_PRINT_EVERY = 30   # [프레임] 손목캠 픽 마커 진단 출력 주기(15Hz → 약 2초)
+
 # ArUco 코너 정밀화
 CORNER_REFINE = "subpix"   # "subpix"(정밀) 또는 "none"(빠름)
 CORNER_REFINE_WIN  = 5
@@ -49,21 +52,21 @@ _LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 _HAS_ARUCO_DETECTOR = hasattr(cv2.aruco, "ArucoDetector")
 
 
-def _make_detector():
+def _make_detector(corner_refine=CORNER_REFINE):
     d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    if not _HAS_ARUCO_DETECTOR:
+        return d, cv2.aruco.DetectorParameters_create()  # OpenCV<4.7 구API
     pr = cv2.aruco.DetectorParameters()
-    if _HAS_ARUCO_DETECTOR:
-        mode = {"subpix": getattr(cv2.aruco, "CORNER_REFINE_SUBPIX", 1),
-                "none": getattr(cv2.aruco, "CORNER_REFINE_NONE", 0)}
-        try:
-            pr.cornerRefinementMethod = mode.get(CORNER_REFINE, mode["none"])
-            pr.cornerRefinementWinSize = CORNER_REFINE_WIN
-            pr.cornerRefinementMaxIterations = CORNER_REFINE_ITER
-            pr.cornerRefinementMinAccuracy = CORNER_REFINE_ACC
-        except Exception:
-            pass
-        return cv2.aruco.ArucoDetector(d, pr)
-    return d, pr
+    mode = {"subpix": getattr(cv2.aruco, "CORNER_REFINE_SUBPIX", 1),
+            "none": getattr(cv2.aruco, "CORNER_REFINE_NONE", 0)}
+    try:
+        pr.cornerRefinementMethod = mode.get(corner_refine, mode["none"])
+        pr.cornerRefinementWinSize = CORNER_REFINE_WIN
+        pr.cornerRefinementMaxIterations = CORNER_REFINE_ITER
+        pr.cornerRefinementMinAccuracy = CORNER_REFINE_ACC
+    except Exception:
+        pass
+    return cv2.aruco.ArucoDetector(d, pr)
 
 
 def _detect_markers(gray, det):
@@ -94,7 +97,7 @@ def _tf_to_Rt(tf):
 class VisionNode(Node):
     def __init__(self):
         super().__init__("vision_node")
-        self.det = _make_detector()
+        self.det = _make_detector(self.declare_parameter("corner_refine", CORNER_REFINE).value)
         self.clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         self.faces = compute_marker_faces()
         # place 선반 전면 마커(ID5/ID7) — plant_node.py의 build_place_shelf()와 같은 오프셋을 써야 함
@@ -113,6 +116,28 @@ class VisionNode(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
+        self.declare_parameter("eih_pick_marker_id", TOP_MARKER_ID)
+        self.declare_parameter("eih_pick_marker_size_m", TOP_MARKER_SIZE)
+        self.pick_marker_id = int(self.get_parameter("eih_pick_marker_id").value)
+        self.pick_marker_size = float(self.get_parameter("eih_pick_marker_size_m").value)
+        _h = self.pick_marker_size / 2.0
+        self.pick_top_pts = np.array([[-_h, _h, 0.], [_h, _h, 0.],
+                                       [_h, -_h, 0.], [-_h, -_h, 0.]], np.float32)
+        # sim의 eih_cam(USD 카메라)은 OpenCV(x-right,y-down,z-fwd)와 y/z 부호가 반대라
+        # solvePnP 결과에 diag(1,-1,-1)이 필요했음 — 실물 eih_cam(link6 기준 직접 정의,
+        # OpenCV 관례)은 이 반전이 필요 없어서 파라미터로 껐다 켰다 가능하게 함.
+        self.eih_axis_flip = bool(self.declare_parameter("eih_axis_flip", True).value)
+        self.eih_y_sign = -1.0 if bool(self.declare_parameter("eih_y_flip", False).value) else 1.0
+        _base = np.diag([1.0, -1.0, -1.0]) if self.eih_axis_flip else np.eye(3)
+        self._eih_axis_diag = np.diag([1.0, self.eih_y_sign, 1.0]) @ _base
+
+        # 실제 파이프라인이 쓰는 검출/포즈를 그대로 그려서 발행 — 별도 디버그 노드와 달리
+        # 여기서 보이는 값이 곧 /vision/eih_marker_body로 나가는 값이다.
+        self.eih_debug_view = bool(self.declare_parameter("eih_debug_view", False).value)
+        self.pub_eih_debug = (self.create_publisher(Image, "/vision/eih_debug_image", 5)
+                               if self.eih_debug_view else None)
+
+        self.eih_hit = 0   # 손목캠 픽 마커 검출 수 — 주기적 진단 출력 간격 계산용
         self.cam_hit = 0; self.cam_miss = 0
         self.rej_up = 0; self.rej_rep = 0
         self._place_rej = 0   # 선반 마커가 화면엔 잡혔는데 게이트에서 기각된 횟수
@@ -293,63 +318,113 @@ class VisionNode(Node):
         self.pub_chassis.publish(Float32MultiArray(
             data=pack_chassis_pose(bx, by, phi, True, use_id, sim_step, bz)))
 
-    def _solve_top_facing(self, corners):
-        """마커 코너 → 위를 보는 면 기준 body_link 위치. 반환: (x,y,z) 또는 None."""
+    def _solve_top_facing(self, corners, pts=TOP_PTS):
+        """마커 코너 → 위를 보는 면 기준 카메라좌표 위치. 반환: (t, rvec, rep_err) 또는 None
+        (rvec/rep는 디버그 뷰 전용 — 포즈 계산 자체는 t만 쓴다)."""
         try:
             ok, rvecs, tvecs, rep = cv2.solvePnPGeneric(
-                TOP_PTS, corners, self.eih_K, self.dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+                pts, corners, self.eih_K, self.dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
         except Exception:
             ok, rvecs, tvecs, rep = 0, [], [], []
         if not ok or len(rvecs) == 0:
             return None
-        best, best_tz = None, -np.inf
-        for rv, tv in zip(rvecs, tvecs):
+        reps = np.asarray(rep, float).ravel() if len(rep) else np.zeros(len(rvecs))
+        best, best_rv, best_rep, best_tz = None, None, 0.0, -np.inf
+        for kk, (rv, tv) in enumerate(zip(rvecs, tvecs)):
             R, _ = cv2.Rodrigues(rv)
             if R[2, 2] > best_tz:
                 best_tz = R[2, 2]; best = np.asarray(tv, float).ravel()
-        return best
+                best_rv = rv; best_rep = float(reps[kk]) if kk < len(reps) else 0.0
+        return best, best_rv, best_rep
+
+    # ── 손목캠 디버그 뷰(eih_debug_view=true일 때만) ────────────────────────
+    def _dbg_frame(self, msg: Image):
+        """디버그 뷰가 꺼져 있으면 None — 켜져 있을 때만 프레임을 BGR로 복사한다."""
+        if self.pub_eih_debug is None:
+            return None
+        rgba = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 4)
+        return cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
+
+    def _dbg_publish(self, dbg, msg: Image, lines=(), color=(0, 255, 0)):
+        if dbg is None:
+            return
+        for i, line in enumerate(lines):
+            cv2.putText(dbg, line, (8, 20 + i * 18), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, color, 1, cv2.LINE_AA)
+        out = Image()
+        out.header = msg.header
+        out.height, out.width = dbg.shape[0], dbg.shape[1]
+        out.encoding = "bgr8"
+        out.step = out.width * 3
+        out.data = array.array("B", dbg.tobytes())
+        self.pub_eih_debug.publish(out)
 
     # ── 끝단 카메라: 윗면 마커(ID4) → 몸체좌표 위치 ─────────────────────────
     def _on_eih_image(self, msg: Image):
         if self.eih_K is None: return
+        dbg = self._dbg_frame(msg)
         try:
             R_bc, t_bc = _tf_to_Rt(self.tf_buffer.lookup_transform(
                 "body_link", "eih_cam", Time()))
         except Exception:
+            self._dbg_publish(dbg, msg, ["NO TF body_link->eih_cam"], (0, 0, 255))
             return
         gray = _img_to_gray(msg)
 
         cs, ids, _ = _detect_markers(gray, self.det)
         id_list = ids.flatten().tolist() if ids is not None else []
+        if dbg is not None and ids is not None:
+            cv2.aruco.drawDetectedMarkers(dbg, cs, ids)
 
         # place 지그 상판 마커(ID6) — 별도 토픽으로 항상 같이 처리
         if PLACE_TOP_MARKER_ID in id_list:
-            _best = self._solve_top_facing(cs[id_list.index(PLACE_TOP_MARKER_ID)].reshape(4, 2))
+            _sol = self._solve_top_facing(cs[id_list.index(PLACE_TOP_MARKER_ID)].reshape(4, 2))
         else:
-            _best = None
-        if _best is not None:
-            _p_usd = np.diag([1.0, -1.0, -1.0]) @ _best
+            _sol = None
+        if _sol is not None:
+            _p_usd = self._eih_axis_diag @ _sol[0]
             _p_body = R_bc @ _p_usd + t_bc
             self.pub_place_marker.publish(Float32MultiArray(
                 data=pack_eih_marker(_p_body[0], _p_body[1], _p_body[2], True)))
         else:
             self.pub_place_marker.publish(Float32MultiArray(data=pack_eih_marker(0, 0, 0, False)))
 
-        if TOP_MARKER_ID not in id_list:
+        hdr = f"pick ID{self.pick_marker_id} size={self.pick_marker_size*1000:.0f}mm"
+        if self.pick_marker_id not in id_list:
             self.pub_eih.publish(Float32MultiArray(data=pack_eih_marker(0, 0, 0, False)))
+            self._dbg_publish(dbg, msg, [hdr, f"NOT DETECTED (seen={id_list})"], (0, 0, 255))
             return
-        idx = id_list.index(TOP_MARKER_ID)
+        idx = id_list.index(self.pick_marker_id)
         corners = cs[idx].reshape(4, 2)
 
-        best = self._solve_top_facing(corners)
-        if best is None:
+        sol = self._solve_top_facing(corners, self.pick_top_pts)
+        if sol is None:
             self.pub_eih.publish(Float32MultiArray(data=pack_eih_marker(0, 0, 0, False)))
+            self._dbg_publish(dbg, msg, [hdr, "solvePnP FAILED"], (0, 0, 255))
             return
+        best, rvec, rep = sol
 
-        p_usd = np.diag([1.0, -1.0, -1.0]) @ best
+        p_usd = self._eih_axis_diag @ best
         p_body = R_bc @ p_usd + t_bc
         self.pub_eih.publish(Float32MultiArray(
             data=pack_eih_marker(p_body[0], p_body[1], p_body[2], True)))
+
+        # 2초마다 진단 — 캘리브레이션 때 화면을 안 봐도 런치 로그에 그대로 남는다.
+        self.eih_hit += 1
+        if self.eih_hit % EIH_PRINT_EVERY == 1:
+            print(f"    [진단-eih] ID{self.pick_marker_id} size={self.pick_marker_size*1000:.1f}mm  "
+                  f"cam=({best[0]*1000:+.0f},{best[1]*1000:+.0f},{best[2]*1000:+.0f})mm "
+                  f"d={float(np.linalg.norm(best))*1000:.1f}mm rep={rep:.2f}px  "
+                  f"body=({p_body[0]*1000:+.1f},{p_body[1]*1000:+.1f},{p_body[2]*1000:+.1f})mm")
+
+        if dbg is not None:
+            cv2.drawFrameAxes(dbg, self.eih_K, self.dist, rvec,
+                              best.reshape(3, 1), self.pick_marker_size)
+            self._dbg_publish(dbg, msg, [
+                hdr,
+                f"cam=({best[0]:+.3f},{best[1]:+.3f},{best[2]:+.3f})m "
+                f"d={float(np.linalg.norm(best))*100:.1f}cm rep={rep:.2f}px",
+                f"body=({p_body[0]:+.3f},{p_body[1]:+.3f},{p_body[2]:+.3f})m"])
 
 
 def main():

@@ -17,7 +17,7 @@ from sensor_msgs.msg import JointState
 
 from step22_common import (
     SEARCH_Q, PIPER_JOINT_NAMES, TOOL_AXIS_LOCAL, GRIPPER_DOWN,
-    HOVER_PITCH_DEG, GRASP_PITCH_DEG, PLACE_PITCH_DEG,
+    HOVER_PITCH_DEG, GRASP_PITCH_DEG, PLACE_PITCH_DEG, ARM_BASE_YAW_DEG,
     quat_from_two_vec, _quat_mul, _quat_axis_angle, _quat_to_R,
     unpack_joint_hold_target,
 )
@@ -30,9 +30,10 @@ except ImportError:
 
 # ── 사용자 조정 파라미터(ROS 파라미터로도 덮어쓰기 가능) ─────────────────────
 
-CAN_NAME_DEFAULT = "can0"
+CAN_NAME_DEFAULT = "can_piper"  # udev 규칙으로 고정한 이름(USB-CAN 동글) — can0/can1은 부팅마다 순서 바뀜
 REALLY_ENABLE_DEFAULT = False   # True로 명시해야 EnableArm/모션 명령을 실제로 보낸다(첫 기동 안전장치)
-MOVE_SPD_RATE_DEFAULT = 20      # [%] 초기 실물 테스트 안전을 위해 낮게 — 검증 후 사용자가 올릴 것
+ENABLE_ARM_MOTION_DEFAULT = True  # False면 really_enable=true여도 JointCtrl/EndPoseCtrl은 안 보냄(그리퍼만 테스트할 때 씀)
+MOVE_SPD_RATE_DEFAULT = 5       # [%] 실기 검증 중 확정 — 필요시 파라미터로 올릴 것
 TICK_HZ = 60.0                  # arm_node.py/gripper 쪽 스텝 기반 상수(15초=900스텝 등)를 그대로 쓰기 위해 sim과 동일 rate 유지
 
 # plant_node.py:108의 로컬 상수 — Lula가 아니라 실물 펌웨어가 IK를 풀지만, "어느 롤로
@@ -43,7 +44,7 @@ GRASP_ROLL_DEG = -90.0
 # /arm/cartesian_target을 EndPoseCtrl로 스트리밍(plant_node.py:1671/1709 화이트리스트와 동일).
 JOINT_HOLD_PHASES = ("wait", "place_ready", "place_home")
 PLACE_MARKER_PHASES = ("place_hover", "place_detect", "place_descend")
-CARTESIAN_PHASES = ("pre", "grasp", "lift", "place_lower",
+CARTESIAN_PHASES = ("hover", "pre", "grasp", "lift", "place_lower",
                      "place_hover", "place_detect", "place_descend",
                      "place_release", "place_retreat")
 
@@ -52,6 +53,21 @@ CARTESIAN_PHASES = ("pre", "grasp", "lift", "place_lower",
 FAULT_CODES = {1, 2, 3, 4, 7}
 
 # ── 조정 파라미터 끝 ─────────────────────────────────────────────────────────
+
+
+def _body_to_native_xy(x_body, y_body):
+    """arm_node가 body_link 관례(sim의 ARM_BASE_YAW_DEG)로 계산한 XY를 EndPoseCtrl
+    고유좌표(native)로 변환 — 2026-09-17 HOVER_Q_VERIFIED 실측으로 회전각 확인."""
+    a = math.radians(-ARM_BASE_YAW_DEG)
+    return (x_body * math.cos(a) - y_body * math.sin(a),
+            x_body * math.sin(a) + y_body * math.cos(a))
+
+
+def _native_to_body_xy(x_native, y_native):
+    """위 변환의 역 — EndPoseCtrl 피드백(native)을 body_link로 바꿔 /arm/ee_pose_body에 싣는다."""
+    a = math.radians(ARM_BASE_YAW_DEG)
+    return (x_native * math.cos(a) - y_native * math.sin(a),
+            x_native * math.sin(a) + y_native * math.cos(a))
 
 
 def _build_down_quats():
@@ -70,8 +86,7 @@ def _build_down_quats():
 
 def _quat_to_rpy_deg(q):
     """쿼터니언(w,x,y,z) → (roll,pitch,yaw)[deg], R=Rz(yaw)@Ry(pitch)@Rx(roll) 가정.
-    ★검증 필요: piper 펌웨어의 RX,RY,RZ 합성 순서가 이와 같은지 실측으로 확인 전까지는
-    추정치 — GetArmEndPoseMsgs() 피드백과 첫 테스트 시 반드시 대조할 것."""
+    2026-09-17 실기 EndPoseCtrl 테스트로 검증 완료(180도 대칭 이중해로 일치 확인)."""
     R = _quat_to_R(q)
     pitch = -math.asin(np.clip(R[2, 0], -1.0, 1.0))
     roll = math.atan2(R[2, 1], R[2, 2])
@@ -85,9 +100,11 @@ class PiperDriverNode(Node):
 
         self.declare_parameter("can_name", CAN_NAME_DEFAULT)
         self.declare_parameter("really_enable", REALLY_ENABLE_DEFAULT)
+        self.declare_parameter("enable_arm_motion", ENABLE_ARM_MOTION_DEFAULT)
         self.declare_parameter("move_spd_rate_ctrl", MOVE_SPD_RATE_DEFAULT)
         can_name = self.get_parameter("can_name").value
         self.really_enable = bool(self.get_parameter("really_enable").value)
+        self.enable_arm_motion = bool(self.get_parameter("enable_arm_motion").value)
         self.move_spd = int(self.get_parameter("move_spd_rate_ctrl").value)
 
         down_q, hover_q, place_q = _build_down_quats()
@@ -111,9 +128,15 @@ class PiperDriverNode(Node):
             self.piper = C_PiperInterface_V2(can_name)
             self.piper.ConnectPort()
             if self.really_enable:
-                self.get_logger().warn(f"really_enable=True — 실제로 팔을 활성화합니다 (speed {self.move_spd}%)")
+                self.get_logger().warn(
+                    f"really_enable=True — 실제로 팔을 활성화합니다 (speed {self.move_spd}%). "
+                    f"enable_arm_motion={self.enable_arm_motion} — True면 arm_phase 기본값('wait')만으로도 "
+                    f"즉시 SEARCH_Q로 JointCtrl이 나갑니다(arm_node 없어도).")
                 while not self.piper.EnablePiper():
                     time.sleep(0.01)
+                self.piper.MotionCtrl_2(0x01, 0x01, self.move_spd, 0x00)  # ctrl_mode를 CAN 명령 모드로
+                self._last_move_mode = 0x01
+                self.piper.GripperTeachingPendantParamConfig(100, 70, 1)  # 그리퍼 최대행정 70mm 설정
             else:
                 self.get_logger().warn(
                     "really_enable=False(기본값) — CAN 연결/피드백만 하고 모션 명령은 보내지 않습니다. "
@@ -159,7 +182,7 @@ class PiperDriverNode(Node):
 
         self._publish_feedback()
 
-        st = self.piper.GetArmStatus().arm_status
+        st = self.piper.GetArmStatus().arm_status.arm_status  # 바깥 arm_status는 래퍼, 진짜 상태값은 한 겹 더 안에 있음
         if int(st) in FAULT_CODES:
             if not self._fault_latched:
                 self.get_logger().error(f"★ 팔 고장/이상 상태 감지(arm_status={st}) — 새 모션 명령 중단")
@@ -167,7 +190,7 @@ class PiperDriverNode(Node):
             return
         self._fault_latched = False
 
-        if not self.really_enable:
+        if not self.really_enable or not self.enable_arm_motion:
             return
 
         if self.arm_phase in JOINT_HOLD_PHASES:
@@ -176,8 +199,10 @@ class PiperDriverNode(Node):
             self.piper.JointCtrl(*[round(v * 1000) for v in q_deg])
         elif self.arm_phase in CARTESIAN_PHASES and self.cartesian_target is not None:
             self._send_move_mode(0x02)  # MOVE L
-            rx, ry, rz = self._rpy_by_phase[self.arm_phase]
-            x, y, z = self.cartesian_target
+            rx, ry, rz_body = self._rpy_by_phase[self.arm_phase]
+            rz = rz_body - ARM_BASE_YAW_DEG  # 2026-09-17: yaw도 XY랑 같은 회전보정 필요(실측 확인)
+            x_body, y_body, z = self.cartesian_target
+            x, y = _body_to_native_xy(x_body, y_body)
             self.piper.EndPoseCtrl(
                 round(x * 1_000_000), round(y * 1_000_000), round(z * 1_000_000),
                 round(rx * 1000), round(ry * 1000), round(rz * 1000))
@@ -191,8 +216,9 @@ class PiperDriverNode(Node):
 
     def _publish_feedback(self):
         ep = self.piper.GetArmEndPoseMsgs().end_pose
+        x_body, y_body = _native_to_body_xy(ep.X_axis / 1_000_000.0, ep.Y_axis / 1_000_000.0)
         self.pub_ee_pose.publish(Point(
-            x=ep.X_axis / 1_000_000.0, y=ep.Y_axis / 1_000_000.0, z=ep.Z_axis / 1_000_000.0))
+            x=x_body, y=y_body, z=ep.Z_axis / 1_000_000.0))
 
         js = self.piper.GetArmJointMsgs().joint_state
         deg = [js.joint_1, js.joint_2, js.joint_3, js.joint_4, js.joint_5, js.joint_6]

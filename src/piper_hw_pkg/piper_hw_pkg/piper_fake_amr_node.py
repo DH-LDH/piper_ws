@@ -5,13 +5,24 @@ try:
 except Exception:
     pass
 
+import math
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
+from geometry_msgs.msg import TransformStamped
+from tf2_ros import StaticTransformBroadcaster
+
+from step22_common import ARM_BASE_YAW_DEG
 
 # v1(AMR 없이 팔 단독)에서는 amr_node가 아예 안 돈다 — arm_node.py가 그래도 기다리는
 # /amr/lock(픽 시퀀스 개시)·/amr/place_lock(place 시퀀스 개시) 신호를 대신 쏴주는 최소
 # 스텁. "AMR이 이미 정위치에 도킹했다"는 v1의 전제(팔 고정 베이스)를 그대로 신호로 낸다.
+# body_link도 같은 이유로 여기서 정적으로 쏴준다 — 안 하면 vision_node의 body_link→eih_cam
+# TF 조회가 매번 실패해서 손목캠 마커 인식이 통째로 죽는다.
+# 2026-09-17 실기에서 확인: EndPoseCtrl 기준 X가 sim의 body_link Y(KEEP_DIST 전진방향)에
+# 대응함 — sim의 ARM_BASE_YAW_DEG(=90°, 팔이 AMR 몸체 기준 90도 돌아서 장착된 것)를 그대로
+# 반영해야 함(identity로 두면 X/Y가 뒤바뀜).
 
 STARTUP_LOCK_DELAY_SEC = 3.0   # 다른 노드들이 다 올라올 시간을 준다
 
@@ -25,7 +36,18 @@ class PiperFakeAmrNode(Node):
 
         self.create_subscription(String, "/arm/status", self._on_arm_status, 10)
         self._startup_timer = self.create_timer(STARTUP_LOCK_DELAY_SEC, self._send_initial_lock)
-        self.get_logger().info("piper_fake_amr_node 초기화 완료 — AMR 없이 lock/place_lock 대신 발행")
+
+        self.tf_static = StaticTransformBroadcaster(self)
+        tf = TransformStamped()
+        tf.header.stamp = self.get_clock().now().to_msg()
+        tf.header.frame_id = "body_link"
+        tf.child_frame_id = "world"  # URDF 루트(world)를 body_link 밑에 붙임 — base_link에 부모 이중선언 방지
+        h = math.radians(ARM_BASE_YAW_DEG) / 2.0
+        tf.transform.rotation.z = math.sin(h)
+        tf.transform.rotation.w = math.cos(h)
+        self.tf_static.sendTransform(tf)
+
+        self.get_logger().info("piper_fake_amr_node 초기화 완료 — AMR 없이 lock/place_lock/body_link TF 대신 발행")
 
     def _send_initial_lock(self):
         self.pub_lock.publish(Bool(data=True))
