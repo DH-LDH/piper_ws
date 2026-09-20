@@ -16,7 +16,15 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo
 
-# 손목캠 마커 검출 눈으로 확인용 디버그 뷰어 — rqt_image_view로 /vision/eih_debug_image 구독해서 볼 것.
+# 손목캠 마커 검출을 눈으로 확인하는 독립 뷰어. 자체적으로 검출/PnP를 돌리므로
+# vision_node가 실제로 쓰는 값과는 다를 수 있다 — 파이프라인 값을 보려면
+# piper_real.launch.py의 eih_debug_view:=true(vision_node가 직접 그림)를 쓸 것.
+#
+# ★ 토픽이 /vision/eih_marker_debug_image인 이유: vision_node도 디버그 뷰를
+#   /vision/eih_debug_image로 발행한다. 같은 이름을 쓰면 두 발행자가 한 토픽에
+#   섞여 뷰어에 두 검출 결과가 번갈아 뜬다.
+#
+# rqt_image_view로 /vision/eih_marker_debug_image 구독해서 볼 것.
 # 실제 파이프라인(vision_node.py)과 완전히 독립적으로 자체 검출해서 그리기만 한다 — 핵심 로직에 영향 없음.
 
 _LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -66,8 +74,8 @@ class EihMarkerDebugNode(Node):
 
         self.create_subscription(CameraInfo, "/vision/eih_camera_info", self._on_info, _LATCH)
         self.create_subscription(Image, "/vision/eih_image", self._on_image, 5)
-        self.pub_debug = self.create_publisher(Image, "/vision/eih_debug_image", 5)
-        self.get_logger().info("eih_marker_debug_node 초기화 완료 — rqt_image_view로 /vision/eih_debug_image 볼 것")
+        self.pub_debug = self.create_publisher(Image, "/vision/eih_marker_debug_image", 5)
+        self.get_logger().info("eih_marker_debug_node 초기화 완료 — rqt_image_view로 /vision/eih_marker_debug_image 볼 것")
 
     def _on_info(self, msg: CameraInfo):
         self.K = np.array(msg.k, float).reshape(3, 3)
