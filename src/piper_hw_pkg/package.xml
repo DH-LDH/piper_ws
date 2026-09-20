@@ -3,7 +3,7 @@
 <package format="3">
   <name>piper_hw_pkg</name>
   <version>0.0.1</version>
-  <description>실물 PiPER 하드웨어 브릿지 — CAN(piper_sdk) 구동 + 손목캠 소스. sim의 plant_node/gripper_node 역할을 대체(arm_node.py/vision_node.py는 무수정 재사용)</description>
+  <description>실물 PiPER 하드웨어 브릿지 — CAN(piper_sdk) 팔·그리퍼 구동, RealSense 손목캠 소스, 실기 런치</description>
   <maintainer email="ekgks3451@gmail.com">da</maintainer>
   <license>TODO</license>
 

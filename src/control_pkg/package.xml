@@ -3,7 +3,7 @@
 <package format="3">
   <name>control_pkg</name>
   <version>0.0.1</version>
-  <description>STEP22 제어 노드 — AMR 추종제어(amr_node), 로봇팔 시퀀스제어(arm_node)</description>
+  <description>로봇팔 픽앤플레이스 시퀀스 제어 — 상태기계(arm_node)</description>
   <maintainer email="ekgks3451@gmail.com">da</maintainer>
   <license>TODO</license>
 

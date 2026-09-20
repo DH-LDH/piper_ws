@@ -3,7 +3,7 @@
 <package format="3">
   <name>common_pkg</name>
   <version>0.0.1</version>
-  <description>STEP22 공용 상수/순수수학 헬퍼(step22_common) — vision_pkg/control_pkg/hardware_pkg가 공유 의존</description>
+  <description>공용 상수/순수수학 헬퍼(step22_common) — vision_pkg/control_pkg/piper_hw_pkg가 공유 의존</description>
   <maintainer email="ekgks3451@gmail.com">da</maintainer>
   <license>TODO</license>
 
