@@ -76,6 +76,11 @@ def generate_launch_description():
         # 물리 도달 대기 상한[스텝, 60Hz]. 5% 속도면 100mm 이동에만 4초 이상 걸린다 —
         # 900스텝(15초)으로 넉넉히. 여기서 포기하면 덜 문 채로 그리퍼가 닫힌다.
         DeclareLaunchArgument("arrive_max_wait", default_value="900"),
+        # 관절 복귀(SEARCH_Q)는 MOVE J라 도달 확인 수단이 없어 시간으로만 기다린다.
+        # 5% 속도의 큰 이동이라 기본값 2.5~3초로는 모자란다 — step_confirm=true일 땐
+        # 사람이 Enter 누를 때까지의 시간이 가려줬을 뿐이다. 무인 실행 대비로 10초.
+        DeclareLaunchArgument("place_ready_steps", default_value="600"),
+        DeclareLaunchArgument("place_home_settle_steps", default_value="600"),
         # 파지 판정 — 실기엔 차체캠이 없어 chassis 모드는 "미검출=성공"으로 빠진다.
         # 차체캠을 달면 both로 바꿔 두 판정을 교차검증할 것.
         DeclareLaunchArgument("verify_mode", default_value="gripper"),
@@ -170,6 +175,8 @@ def generate_launch_description():
                           "grasp_arrive_tol": LaunchConfiguration("grasp_arrive_tol"),
                           "grasp_arrive_z_tol": LaunchConfiguration("grasp_arrive_z_tol"),
                           "arrive_max_wait": LaunchConfiguration("arrive_max_wait"),
+                          "place_ready_steps": LaunchConfiguration("place_ready_steps"),
+                          "place_home_settle_steps": LaunchConfiguration("place_home_settle_steps"),
                           "pre_redetect": LaunchConfiguration("pre_redetect"),
                           "grasp_eih_track": LaunchConfiguration("grasp_eih_track"),
                           "verify_mode": LaunchConfiguration("verify_mode"),

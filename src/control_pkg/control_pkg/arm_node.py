@@ -57,8 +57,13 @@ GRASP_Z_BELOW_ANCHOR_MAX = 0.02  # [m] (launch: grasp_z_below_anchor_max)
 PLACE_DETECT_TIMEOUT   = 900    # [스텝, 15s] 이 안에 상판 마커를 못 보면 도킹시 추정치로 진행
 PLACE_REDETECT_MAX     = 0.06   # [m] 1회 보정 상한(PRE_REDETECT_MAX와 동일 근거)
 PLACE_Z_DROP_MAX        = 0.05  # [m] 최초 검출보다 낮은 z는 오검출로 기각(GRASP_Z_DROP_MAX 대응)
+# 관절 이동(SEARCH_Q 복귀)은 MOVE J라서 cartesian 단계들과 달리 도달 확인 수단이 없다 —
+# 시간으로만 기다린다. 5% 속도에서 SEARCH_Q까지는 큰 이동이라 아래 기본값(2.5~3초)은
+# 턱없이 짧다. step_confirm=true일 때는 사람이 Enter를 누를 때까지의 시간이 이 부족분을
+# 가려줬다 — 무인(step_confirm=false)에서는 그 여유가 사라지므로 실물 런치에서 늘린다.
+# (launch: place_home_settle_steps / place_ready_steps)
 PLACE_HOME_SETTLE_STEPS = 180   # [스텝, 3s] 초기 자세 복귀 후 정착 대기
-PLACE_READY_STEPS = 150         # [스텝, 2.5s] 중립 자세 복귀 대기 (현재 경로에서는 미사용)
+PLACE_READY_STEPS = 150         # [스텝, 2.5s] 중립 자세 복귀 대기
 
 PLACE_LOWER_DIST = 0.02         # [m] place_lock 시점 팔 자세에서 그리퍼를 수직으로 내리는 거리
 
@@ -210,6 +215,10 @@ class ArmNode(Node):
         self.lift_wait_n = 0   # lift 단계의 같은 카운터
         self.retreat_wait_n = 0  # place_retreat 단계의 같은 카운터
         self.place_hover_wait_n = 0  # place_hover 단계의 같은 카운터
+        self.place_ready_steps = int(
+            self.declare_parameter("place_ready_steps", PLACE_READY_STEPS).value)
+        self.place_home_settle_steps = int(
+            self.declare_parameter("place_home_settle_steps", PLACE_HOME_SETTLE_STEPS).value)
 
         self.grip_contact_result = None  # /gripper/done 수신 시 세팅
         self.grasp_attempt = 0  # 재시도 횟수 (0=첫 시도)
@@ -1018,7 +1027,7 @@ class ArmNode(Node):
             # 버티는 것보다 이쪽이 관성·간섭 면에서도 낫다.
             self.pub_joint_hold.publish(Float32MultiArray(
                 data=pack_joint_hold_target(SEARCH_Q)))
-            if self.arm_step > PLACE_READY_STEPS:
+            if self.arm_step > self.place_ready_steps:
                 print(f"  [팔] 중립 자세 복귀 완료 → PLACE HOVER 시작")
                 self.ml_start = (self.ee_pose.copy() if self.ee_pose is not None
                                   else self.ml_place_center.copy())
@@ -1158,7 +1167,7 @@ class ArmNode(Node):
             # 플레이스가 끝나면 팔을 대기자세(SEARCH_Q)로 되돌린다(직접 관절목표, IK 경유 안 함)
             self.pub_joint_hold.publish(Float32MultiArray(
                 data=pack_joint_hold_target(SEARCH_Q)))
-            if self.arm_step > PLACE_HOME_SETTLE_STEPS:
+            if self.arm_step > self.place_home_settle_steps:
                 print(f"  [팔] ✓ 초기 자세 복귀 완료 — 플레이스 시퀀스 종료")
                 self.arm_phase = "place_done"; self.arm_step = 0
 
