@@ -42,7 +42,9 @@ GRASP_ROLL_DEG = -90.0
 
 # arm_node.py가 이 phase 문자열일 때 관절유지(JointCtrl, SEARCH_Q)를 쓴다 — 나머지는 전부
 # /arm/cartesian_target을 EndPoseCtrl로 스트리밍(plant_node.py:1671/1709 화이트리스트와 동일).
-JOINT_HOLD_PHASES = ("wait", "place_ready", "place_home")
+# place_done도 관절유지 — arm_node가 "최종 자세"를 여기서 지령한다(예전엔 아무 명령도
+# 안 보내서 place_home의 마지막 명령을 그대로 물려받기만 했다).
+JOINT_HOLD_PHASES = ("wait", "place_ready", "place_home", "place_done")
 # place 자세(place_pitch_deg)를 쓰는 구간 — 릴리즈/후퇴까지 포함해야 한다. 빼면 그리퍼를
 # 여는 바로 그 순간 손목이 픽 자세로 홱 돌아 방금 놓은 물체를 친다.
 PLACE_MARKER_PHASES = ("place_hover", "place_detect", "place_descend",

@@ -12,12 +12,13 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from std_msgs.msg import Float32MultiArray, Bool, String, Int32
 from geometry_msgs.msg import Point
+from sensor_msgs.msg import JointState
 
 from step22_common import (
     KEEP_DIST, OBJ_CENTER_BODY, HOLD_MAX, SEARCH_Q, GRASP_APPROACH_DIR,
     HOVER_STANDOFF, HOVER_APPROACH_DIR, EE_GRIP_OFFSET, MK_TOP_OFFSET,
     BODY_LINK_WORLD_Z, PLACE_CENTER_BODY_GUESS,
-    OBJ_S, BOARD_T, CELL_GAP, CELL_T, PLACE_PITCH_DEG,
+    OBJ_S, BOARD_T, CELL_GAP, CELL_T, PLACE_PITCH_DEG, PIPER_JOINT_NAMES,
     unpack_chassis_pose, unpack_eih_marker, unpack_grip_state,
     pack_joint_hold_target,
 )
@@ -219,6 +220,43 @@ class ArmNode(Node):
             self.declare_parameter("place_ready_steps", PLACE_READY_STEPS).value)
         self.place_home_settle_steps = int(
             self.declare_parameter("place_home_settle_steps", PLACE_HOME_SETTLE_STEPS).value)
+        # 관절 이동(MOVE J) 단계의 도달 판정 허용오차[deg]. 0 이하면 "로그만" 모드 —
+        # 판정은 종전처럼 시간으로 하고 실제 관절 오차만 찍는다(동작 변화 없음).
+        # 실측 수치를 먼저 모으고, 얼마가 정상인지 안 뒤에 양수로 켜는 순서로 쓸 것.
+        self.place_joint_tol_deg = float(
+            self.declare_parameter("place_joint_arrive_tol_deg", 0.0).value)
+        # 플레이스 종료 후 되돌아갈 자세[deg, joint1~6]. 기본은 대기자세(SEARCH_Q)지만
+        # 실기 배치에 따라 다른 자세가 편할 수 있어 런치 인자로 뺐다.
+        # ★ IK를 거치지 않는 직접 관절지령이라 도달 가능성 검사가 없다 — 주변 구조물과
+        #   부딪히지 않는 값인지 set_arm_joint.py로 먼저 확인하고 넣을 것.
+        self.place_home_q = np.radians(np.array(
+            self.declare_parameter("place_home_q_deg",
+                                    [float(v) for v in np.degrees(SEARCH_Q)]).value, float))
+        if self.place_home_q.shape != (6,):
+            print(f"  ★ place_home_q_deg 개수가 6이 아님 — SEARCH_Q로 진행")
+            self.place_home_q = np.array(SEARCH_Q, float)
+        if not np.allclose(self.place_home_q, SEARCH_Q):
+            print(f"  [팔] place_home 자세 = {np.degrees(self.place_home_q).round(1)}deg "
+                  f"(기본 SEARCH_Q 아님)")
+        # place_home(SEARCH_Q) 도달을 확인한 뒤 마지막으로 갈 자세. 기본은 place_home과
+        # 같아서 아무 데도 안 가고 그대로 머문다 — 실측한 각도를 넣으면 그때부터 이동한다.
+        self.place_done_q = np.radians(np.array(
+            self.declare_parameter("place_done_q_deg",
+                                    [float(v) for v in np.degrees(SEARCH_Q)]).value, float))
+        if self.place_done_q.shape != (6,):
+            print(f"  ★ place_done_q_deg 개수가 6이 아님 — SEARCH_Q로 진행")
+            self.place_done_q = np.array(SEARCH_Q, float)
+        self.place_done_same = bool(np.allclose(self.place_done_q, self.place_home_q))
+        if not self.place_done_same:
+            print(f"  [팔] place_done 최종 자세 = "
+                  f"{np.degrees(self.place_done_q).round(1)}deg")
+        # place_done은 SEARCH_Q에서 관절 80° 이상 떨어진 자세일 수 있다 — 5% 속도면
+        # 그것만 10초 가까이 걸리므로 place_home과 같은 상한을 쓰면 "완료"를 먼저 찍는다.
+        self.place_done_settle_steps = int(
+            self.declare_parameter("place_done_settle_steps",
+                                    PLACE_HOME_SETTLE_STEPS).value)
+        self._place_done_logged = False
+        self.joint_now = None   # /joint_states 최신값(PIPER_JOINT_NAMES 순서, rad)
 
         self.grip_contact_result = None  # /gripper/done 수신 시 세팅
         self.grasp_attempt = 0  # 재시도 횟수 (0=첫 시도)
@@ -329,6 +367,9 @@ class ArmNode(Node):
         self.create_subscription(Point, "/arm/ee_pose_body", self._on_ee_pose, 10)
         self.create_subscription(Bool, "/gripper/done", self._on_gripper_done, 10)
         self.create_subscription(Float32MultiArray, "/gripper/grip_state", self._on_grip_state, 10)
+        # 관절 이동 단계(place_ready/place_home)는 MOVE J라 ee_pose로는 도달을 못 잰다 —
+        # 드라이버가 이미 60Hz로 쏘고 있는 실제 관절각으로 대조한다.
+        self.create_subscription(JointState, "/joint_states", self._on_joint_states, 10)
 
         self.create_subscription(Int32, "/plant/tick", self._tick, 20)
         self.create_timer(2.0, self._publish_status)
@@ -407,6 +448,46 @@ class ArmNode(Node):
                     self.verify_low_hits += 1
                 else:
                     self.verify_high_hits += 1
+
+    def _on_joint_states(self, msg: JointState):
+        try:
+            idx = [msg.name.index(n) for n in PIPER_JOINT_NAMES]
+        except ValueError:
+            return  # 팔 관절이 아닌 joint_states(sim 등) — 무시
+        self.joint_now = np.array([msg.position[i] for i in idx], float)
+
+    def _joint_err_deg(self, q_target):
+        """현재 관절각과 목표의 최대 오차[deg]. /joint_states 미수신이면 None."""
+        if self.joint_now is None:
+            return None
+        return float(np.max(np.abs(np.degrees(
+            self.joint_now - np.asarray(q_target, float)))))
+
+    def _joint_settled(self, label, q_target, max_steps):
+        """관절 이동 완료 판정(True=진행해도 됨).
+        place_joint_arrive_tol_deg가 0 이하면 판정은 종전처럼 "시간"으로 하고 실제
+        관절 오차는 로그로만 남긴다 — 정상 오차가 얼마인지 모르는 채로 좁게 잡으면
+        매번 상한까지 기다리게 되므로, 수치를 먼저 모으는 게 기본값이다."""
+        err = self._joint_err_deg(q_target)
+        if err is not None and self.arm_step > 0 and self.arm_step % 120 == 0:
+            print(f"    [{label} 관절] 도달오차 {err:.2f}° "
+                  f"(step {self.arm_step}/{max_steps})")
+        tol = self.place_joint_tol_deg
+        if tol > 0.0 and err is not None:
+            if err <= tol:
+                print(f"    [{label} 관절 도달오차] {err:.2f}° (허용 {tol:.1f}°)")
+                return True
+            if self.arm_step > max_steps:
+                print(f"    ★ [{label}] 관절 도달 실패(오차 {err:.2f}° > {tol:.1f}°, "
+                      f"{max_steps}스텝 초과) — 그냥 진행")
+                return True
+            return False
+        if self.arm_step > max_steps:
+            es = "미수신" if err is None else f"{err:.2f}°"
+            print(f"    [{label} 관절] 시간 만료({max_steps}스텝) 시점 도달오차 {es} "
+                  f"— 판정은 시간 기준(place_joint_arrive_tol_deg로 실도달 판정 전환)")
+            return True
+        return False
 
     def _on_ee_pose(self, msg: Point):
         self.ee_pose = np.array([msg.x, msg.y, msg.z], float)
@@ -1027,7 +1108,7 @@ class ArmNode(Node):
             # 버티는 것보다 이쪽이 관성·간섭 면에서도 낫다.
             self.pub_joint_hold.publish(Float32MultiArray(
                 data=pack_joint_hold_target(SEARCH_Q)))
-            if self.arm_step > self.place_ready_steps:
+            if self._joint_settled("place_ready", SEARCH_Q, self.place_ready_steps):
                 print(f"  [팔] 중립 자세 복귀 완료 → PLACE HOVER 시작")
                 self.ml_start = (self.ee_pose.copy() if self.ee_pose is not None
                                   else self.ml_place_center.copy())
@@ -1166,10 +1247,27 @@ class ArmNode(Node):
         elif ap == "place_home":
             # 플레이스가 끝나면 팔을 대기자세(SEARCH_Q)로 되돌린다(직접 관절목표, IK 경유 안 함)
             self.pub_joint_hold.publish(Float32MultiArray(
-                data=pack_joint_hold_target(SEARCH_Q)))
-            if self.arm_step > self.place_home_settle_steps:
-                print(f"  [팔] ✓ 초기 자세 복귀 완료 — 플레이스 시퀀스 종료")
+                data=pack_joint_hold_target(self.place_home_q)))
+            if self._joint_settled("place_home", self.place_home_q,
+                                    self.place_home_settle_steps):
+                if self.place_done_same:
+                    print(f"  [팔] ✓ 초기 자세 복귀 완료 — 플레이스 시퀀스 종료")
+                else:
+                    print(f"  [팔] ✓ 초기 자세 복귀 완료 → 최종 자세로 이동 "
+                          f"{np.degrees(self.place_done_q).round(1)}deg")
+                self._place_done_logged = False
                 self.arm_phase = "place_done"; self.arm_step = 0
+
+        elif ap == "place_done":
+            # 마지막 자세를 계속 지령한다 — 드라이버가 같은 값은 중복생략하므로 CAN
+            # 부하는 없다. place_done_q가 place_home_q와 같으면 실질적으로 제자리 유지.
+            self.pub_joint_hold.publish(Float32MultiArray(
+                data=pack_joint_hold_target(self.place_done_q)))
+            if not self._place_done_logged:
+                if self._joint_settled("place_done", self.place_done_q,
+                                        self.place_done_settle_steps):
+                    self._place_done_logged = True
+                    print(f"  [팔] ✓ 최종 자세 도달 — 시퀀스 완전 종료")
 
         self.pub_status.publish(String(data=f"phase={self.arm_phase} arm_step={self.arm_step}"))
 

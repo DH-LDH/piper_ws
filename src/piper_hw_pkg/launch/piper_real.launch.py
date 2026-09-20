@@ -81,6 +81,19 @@ def generate_launch_description():
         # 사람이 Enter 누를 때까지의 시간이 가려줬을 뿐이다. 무인 실행 대비로 10초.
         DeclareLaunchArgument("place_ready_steps", default_value="600"),
         DeclareLaunchArgument("place_home_settle_steps", default_value="600"),
+        # 관절 도달 허용오차[deg]. 0 = 로그만(판정은 시간 기준, 동작 변화 없음).
+        # 첫 런에서 [place_home 관절] 도달오차 실측을 보고 그 2~3배로 켤 것.
+        DeclareLaunchArgument("place_joint_arrive_tol_deg", default_value="0.0"),
+        # 플레이스 종료 후 자세[deg, joint1~6]. 기본은 SEARCH_Q(=대기자세).
+        # IK를 안 거치는 직접 관절지령이라 도달/간섭 검사가 없다 — 바꿀 땐
+        # set_arm_joint.py로 그 자세를 먼저 확인하고 넣을 것.
+        DeclareLaunchArgument("place_home_q_deg", default_value="[0.0, 45.0, -90.0, 0.0, 45.0, 0.0]"),
+        # place_home(SEARCH_Q) 도달 확인 뒤 마지막으로 갈 자세[deg].
+        # 2026-09-20 read_arm_joint.py로 손으로 잡아 실측한 값.
+        DeclareLaunchArgument("place_done_q_deg",
+                              default_value="[0.0, -1.5, -5.0, -8.0, 28.5, 5.0]"),
+        # SEARCH_Q에서 관절 80° 이상 이동하는 자세라 5% 속도에선 place_home보다 오래 걸린다.
+        DeclareLaunchArgument("place_done_settle_steps", default_value="1200"),
         # 파지 판정 — 실기엔 차체캠이 없어 chassis 모드는 "미검출=성공"으로 빠진다.
         # 차체캠을 달면 both로 바꿔 두 판정을 교차검증할 것.
         DeclareLaunchArgument("verify_mode", default_value="gripper"),
@@ -177,6 +190,12 @@ def generate_launch_description():
                           "arrive_max_wait": LaunchConfiguration("arrive_max_wait"),
                           "place_ready_steps": LaunchConfiguration("place_ready_steps"),
                           "place_home_settle_steps": LaunchConfiguration("place_home_settle_steps"),
+                          "place_joint_arrive_tol_deg": LaunchConfiguration("place_joint_arrive_tol_deg"),
+                          "place_home_q_deg": ParameterValue(
+                              LaunchConfiguration("place_home_q_deg"), value_type=None),
+                          "place_done_q_deg": ParameterValue(
+                              LaunchConfiguration("place_done_q_deg"), value_type=None),
+                          "place_done_settle_steps": LaunchConfiguration("place_done_settle_steps"),
                           "pre_redetect": LaunchConfiguration("pre_redetect"),
                           "grasp_eih_track": LaunchConfiguration("grasp_eih_track"),
                           "verify_mode": LaunchConfiguration("verify_mode"),
