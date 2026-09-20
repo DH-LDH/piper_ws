@@ -345,7 +345,9 @@ class ArmNode(Node):
         _ppr = np.radians(self.place_pitch_deg)
         self.place_approach_dir = np.array([0.0, np.sin(_ppr), -np.cos(_ppr)])
 
-        self.place_est = None        # 차체캠이 본 place 선반 (bx,by,phi)
+        # 차체캠이 본 place 선반 (bx,by,phi). 현재 읽는 곳이 없다 — 차체 카메라를
+        # 달았을 때 place 도킹/교차검증에 쓰려고 구독과 함께 남겨둔 자리다.
+        self.place_est = None
         # marker_inset 모드에서는 "place 마커가 대략 있을 body_link 위치"를 뜻하고,
         # shelf_geom 모드에서는 종전대로 "놓을 물체 중심 위치"를 뜻한다.
         self.ml_place_center = np.array([
@@ -1120,15 +1122,17 @@ class ArmNode(Node):
                 self.arm_phase = "place_release"; self.arm_step = 0
 
         # ─────────────────────────────────────────────────────────────────
-        # 아래 place_ready~place_retreat는 마커 기반 정밀 배치(구버전) — 지금은
-        # _on_place_lock()이 place_lower로 직행해 이 블록들에 도달하지 않는다.
-        # 나중에 근접 시야/IK 갈래 문제를 해결하면 _on_place_lock()의 진입점만
-        # "place_ready"로 되돌려 재활성화할 수 있도록 코드를 그대로 남겨둔다.
+        # 아래 place_ready~place_retreat가 마커 기반 정밀 배치 경로다.
+        # use_marker_place=True(현재 기본)면 _on_place_lock()이 여기로 직행하므로
+        # 이 블록들이 실제로 도는 주경로다. 위의 place_lower는 반대로
+        # use_marker_place=False일 때만 쓰는 단순 수직하강 경로다.
         # ─────────────────────────────────────────────────────────────────
         elif ap == "place_ready":
             # 물체를 쥔 채 중립(SEARCH_Q)으로 복귀 — 그리퍼 명령은 안 건드리므로
             # 물체는 계속 잡고 있다. 리프트 자세 그대로 place 위치로 가는 것보다
             # 관성·간섭 면에서 낫다.
+            # 여기는 place_home_q가 아니라 SEARCH_Q를 쓴다. place_home_q는 "다 끝나고
+            # 돌아갈 자세"이고 여기는 "물체를 쥔 채 거쳐 가는 중립 자세"라 목적이 다르다.
             self.pub_joint_hold.publish(Float32MultiArray(
                 data=pack_joint_hold_target(SEARCH_Q)))
             if self._joint_settled("place_ready", SEARCH_Q, self.place_ready_steps):
