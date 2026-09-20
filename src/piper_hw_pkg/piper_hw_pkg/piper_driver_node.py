@@ -43,7 +43,10 @@ GRASP_ROLL_DEG = -90.0
 # arm_node.py가 이 phase 문자열일 때 관절유지(JointCtrl, SEARCH_Q)를 쓴다 — 나머지는 전부
 # /arm/cartesian_target을 EndPoseCtrl로 스트리밍(plant_node.py:1671/1709 화이트리스트와 동일).
 JOINT_HOLD_PHASES = ("wait", "place_ready", "place_home")
-PLACE_MARKER_PHASES = ("place_hover", "place_detect", "place_descend")
+# place 자세(place_pitch_deg)를 쓰는 구간 — 릴리즈/후퇴까지 포함해야 한다. 빼면 그리퍼를
+# 여는 바로 그 순간 손목이 픽 자세로 홱 돌아 방금 놓은 물체를 친다.
+PLACE_MARKER_PHASES = ("place_hover", "place_detect", "place_descend",
+                       "place_release", "place_retreat")
 CARTESIAN_PHASES = ("hover", "pre", "grasp", "lift", "place_lower",
                      "place_hover", "place_detect", "place_descend",
                      "place_release", "place_retreat")
@@ -70,7 +73,7 @@ def _native_to_body_xy(x_native, y_native):
             x_native * math.sin(a) + y_native * math.cos(a))
 
 
-def _build_down_quats():
+def _build_down_quats(place_pitch_deg=PLACE_PITCH_DEG):
     """DOWN_QUAT/HOVER_DOWN_QUAT/PLACE_DOWN_QUAT — plant_node.py:1173-1208과 동일 식."""
     def _one(pitch_deg):
         q = quat_from_two_vec(TOOL_AXIS_LOCAL, GRIPPER_DOWN)
@@ -81,7 +84,7 @@ def _build_down_quats():
             q = _quat_mul(q, _quat_axis_angle(TOOL_AXIS_LOCAL, GRASP_ROLL_DEG))
             q = q / np.linalg.norm(q)
         return q
-    return _one(GRASP_PITCH_DEG), _one(HOVER_PITCH_DEG), _one(PLACE_PITCH_DEG)
+    return _one(GRASP_PITCH_DEG), _one(HOVER_PITCH_DEG), _one(place_pitch_deg)
 
 
 def _quat_to_rpy_deg(q):
@@ -102,12 +105,16 @@ class PiperDriverNode(Node):
         self.declare_parameter("really_enable", REALLY_ENABLE_DEFAULT)
         self.declare_parameter("enable_arm_motion", ENABLE_ARM_MOTION_DEFAULT)
         self.declare_parameter("move_spd_rate_ctrl", MOVE_SPD_RATE_DEFAULT)
+        # arm_node의 같은 이름 파라미터와 반드시 같은 값을 줄 것 — 한쪽만 바꾸면
+        # 목표점(arm_node)과 손목 자세(driver)가 서로 다른 pitch를 쓴다.
+        self.declare_parameter("place_pitch_deg", PLACE_PITCH_DEG)
         can_name = self.get_parameter("can_name").value
         self.really_enable = bool(self.get_parameter("really_enable").value)
         self.enable_arm_motion = bool(self.get_parameter("enable_arm_motion").value)
         self.move_spd = int(self.get_parameter("move_spd_rate_ctrl").value)
 
-        down_q, hover_q, place_q = _build_down_quats()
+        down_q, hover_q, place_q = _build_down_quats(
+            float(self.get_parameter("place_pitch_deg").value))
         quat_by_phase = {ph: (place_q if ph in PLACE_MARKER_PHASES else down_q)
                          for ph in CARTESIAN_PHASES}
         quat_by_phase["hover"] = hover_q
@@ -117,6 +124,13 @@ class PiperDriverNode(Node):
         self.joint_hold_target = np.array(SEARCH_Q, float)
         self.cartesian_target = None
         self._last_move_mode = None  # ModeCtrl 중복호출 방지(CAN 트래픽 절약)
+        # ★ 같은 목표를 60Hz로 재전송하면 펌웨어가 매 틱 MOVE L을 새로 시작한다 —
+        # 5% 속도에서는 가속 램프가 매번 리셋돼 팔이 사실상 안 움직인다(2026-09-20 실기:
+        # grasp 28초 동안 5mm 이동 → 명령이 끊긴 grip 단계에서 8초에 133mm 이동).
+        # 그래서 값이 "바뀐 경우에만" 보낸다. 유지는 펌웨어가 알아서 한다.
+        self._last_endpose = None
+        self._last_jointctrl = None
+        self._cmd_sent = 0; self._cmd_skipped = 0
         self._fault_latched = False
 
         self.piper = None
@@ -154,12 +168,20 @@ class PiperDriverNode(Node):
 
         self._tick_n = 0
         self.create_timer(1.0 / TICK_HZ, self._tick)
+        self.create_timer(5.0, self._publish_cmd_stats)
         self.get_logger().info(f"piper_driver_node 초기화 완료 (can={can_name}, really_enable={self.really_enable})")
 
     # ── 구독 콜백 ────────────────────────────────────────────────────────────
     def _on_arm_status(self, msg: String):
-        self.arm_phase = (msg.data.split(" ")[0].split("=")[-1]
-                           if "phase=" in msg.data else msg.data)
+        phase = (msg.data.split(" ")[0].split("=")[-1]
+                  if "phase=" in msg.data else msg.data)
+        if phase != self.arm_phase:
+            # 단계가 바뀌면 중복생략 캐시를 비운다 — 값이 직전 단계와 같아도(예: 기동
+            # 시 'wait'의 SEARCH_Q와 'place_home'의 SEARCH_Q) 한 번은 다시 보내야 한다.
+            # 안 그러면 그 단계의 명령이 통째로 안 나간다(2026-09-20 실기에서 확인).
+            self._last_endpose = None
+            self._last_jointctrl = None
+        self.arm_phase = phase
 
     def _on_cart_target(self, msg: Point):
         self.cartesian_target = np.array([msg.x, msg.y, msg.z], float)
@@ -196,17 +218,35 @@ class PiperDriverNode(Node):
         if self.arm_phase in JOINT_HOLD_PHASES:
             self._send_move_mode(0x01)  # MOVE J
             q_deg = np.degrees(self.joint_hold_target)
-            self.piper.JointCtrl(*[round(v * 1000) for v in q_deg])
+            cmd = tuple(round(v * 1000) for v in q_deg)
+            if cmd != self._last_jointctrl:
+                self._last_jointctrl = cmd
+                self._cmd_sent += 1
+                self.piper.JointCtrl(*cmd)
+            else:
+                self._cmd_skipped += 1
         elif self.arm_phase in CARTESIAN_PHASES and self.cartesian_target is not None:
             self._send_move_mode(0x02)  # MOVE L
             rx, ry, rz_body = self._rpy_by_phase[self.arm_phase]
             rz = rz_body - ARM_BASE_YAW_DEG  # 2026-09-17: yaw도 XY랑 같은 회전보정 필요(실측 확인)
             x_body, y_body, z = self.cartesian_target
             x, y = _body_to_native_xy(x_body, y_body)
-            self.piper.EndPoseCtrl(
-                round(x * 1_000_000), round(y * 1_000_000), round(z * 1_000_000),
-                round(rx * 1000), round(ry * 1000), round(rz * 1000))
+            cmd = (round(x * 1_000_000), round(y * 1_000_000), round(z * 1_000_000),
+                   round(rx * 1000), round(ry * 1000), round(rz * 1000))
+            if cmd != self._last_endpose:
+                self._last_endpose = cmd
+                self._cmd_sent += 1
+                self.piper.EndPoseCtrl(*cmd)
+            else:
+                self._cmd_skipped += 1
+        # 그 외(detect/verify/grip/place_wait 등)는 명령을 안 보낸다 — 팔은 마지막
+        # 목표를 유지한다. 캐시 비우기는 _on_arm_status()의 단계 전환에서 처리.
         # 그 외(detect/verify/place_wait 등)는 팔이 마지막 목표를 유지 — 새 명령 없음.
+
+    def _publish_cmd_stats(self):
+        self.get_logger().info(
+            f"모션명령 전송 {self._cmd_sent}회 / 중복생략 {self._cmd_skipped}회 "
+            f"(phase={self.arm_phase})")
 
     def _send_move_mode(self, move_mode):
         if self._last_move_mode == move_mode:

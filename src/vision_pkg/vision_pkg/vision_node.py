@@ -38,6 +38,19 @@ PLACE_PHI_ALPHA = 0.08    # 도킹 중 phi(선반 방향) 안정화 EMA 계수 �
 
 EIH_PRINT_EVERY = 30   # [프레임] 손목캠 픽 마커 진단 출력 주기(15Hz → 약 2초)
 
+# 손목캠 재투영 게이트 — 차체캠의 REPROJ_MAX(3px)를 그대로 쓰면 안 된다. 손목캠은 0.1~0.2m
+# 근접 관측이라 같은 3D 정확도라도 마커가 화면에서 크고 px 오차가 그만큼 커진다(rep=7.4px
+# 실측). 그래서 "마커 한 변 길이 대비 비율"을 주 게이트로 쓰고, px 절대값은 명백한 쓰레기만
+# 거르는 상한으로만 둔다. 기각은 곧 "그 프레임 미검출"이라 팔은 직전 목표를 유지한다(안전측).
+# ★ 기본값은 일부러 "거의 안 거르는" 값이다. detect 단계에는 타임아웃이 없어서, 근거 없이
+# 조인 임계값이 모든 프레임을 기각하면 픽이 그 자리에서 멈춘다. 순서는 관측 먼저:
+#   1) 한 번 돌리고 [진단-eih] 로그의 rel(%)이 평소 얼마인지 본다(2초마다 찍힌다).
+#   2) 평소값의 약 2배로 max_rel을 내린다(예: 평소 1.5%면 0.03).
+#   3) 기각누적이 늘어나는데 파지가 멀쩡하면 더 조이고, 검출이 끊기면 되돌린다.
+# 참고: 34mm 마커·640x480·fx≈600이면 한 변이 0.1m에서 ≈200px, 0.2m에서 ≈100px이다.
+EIH_REPROJ_MAX_PX  = 30.0   # [px] 절대 상한 — 자세해가 완전히 깨진 프레임만 거른다
+EIH_REPROJ_MAX_REL = 0.20   # [-] rep / 마커 한 변 픽셀길이 — 스케일 불변 게이트(관측용 느슨값)
+
 # ArUco 코너 정밀화
 CORNER_REFINE = "subpix"   # "subpix"(정밀) 또는 "none"(빠름)
 CORNER_REFINE_WIN  = 5
@@ -123,6 +136,19 @@ class VisionNode(Node):
         _h = self.pick_marker_size / 2.0
         self.pick_top_pts = np.array([[-_h, _h, 0.], [_h, _h, 0.],
                                        [_h, -_h, 0.], [-_h, -_h, 0.]], np.float32)
+        # place 지그 상판 마커 — 실물은 픽 마커와 같은 34mm를 쓰는데, 예전엔 TOP_PTS(20mm)로
+        # 풀어서 거리가 20/34배로 축소돼 나왔다(놓는점이 통째로 틀어짐).
+        self.place_marker_id = int(
+            self.declare_parameter("eih_place_marker_id", PLACE_TOP_MARKER_ID).value)
+        self.place_marker_size = float(
+            self.declare_parameter("eih_place_marker_size_m", TOP_MARKER_SIZE).value)
+        _hp = self.place_marker_size / 2.0
+        self.place_top_pts = np.array([[-_hp, _hp, 0.], [_hp, _hp, 0.],
+                                        [_hp, -_hp, 0.], [-_hp, -_hp, 0.]], np.float32)
+        self.eih_reproj_max_px = float(
+            self.declare_parameter("eih_reproj_max_px", EIH_REPROJ_MAX_PX).value)
+        self.eih_reproj_max_rel = float(
+            self.declare_parameter("eih_reproj_max_rel", EIH_REPROJ_MAX_REL).value)
         # sim의 eih_cam(USD 카메라)은 OpenCV(x-right,y-down,z-fwd)와 y/z 부호가 반대라
         # solvePnP 결과에 diag(1,-1,-1)이 필요했음 — 실물 eih_cam(link6 기준 직접 정의,
         # OpenCV 관례)은 이 반전이 필요 없어서 파라미터로 껐다 켰다 가능하게 함.
@@ -138,6 +164,8 @@ class VisionNode(Node):
                                if self.eih_debug_view else None)
 
         self.eih_hit = 0   # 손목캠 픽 마커 검출 수 — 주기적 진단 출력 간격 계산용
+        self.eih_rej_rep = 0     # 재투영 게이트에서 기각된 픽 마커 프레임 수
+        self.eih_rep_max = 0.0   # 통과한 프레임의 최대 rep(px) — 게이트 재조정 근거
         self.cam_hit = 0; self.cam_miss = 0
         self.rej_up = 0; self.rej_rep = 0
         self._place_rej = 0   # 선반 마커가 화면엔 잡혔는데 게이트에서 기각된 횟수
@@ -337,6 +365,22 @@ class VisionNode(Node):
                 best_rv = rv; best_rep = float(reps[kk]) if kk < len(reps) else 0.0
         return best, best_rv, best_rep
 
+    def _eih_reproj_ok(self, corners, rep, tag):
+        """손목캠 재투영 게이트 — (통과여부, 마커 한 변 픽셀길이, 상대오차).
+        px 절대값과 마커 크기 대비 비율을 둘 다 봐야 원거리/근접이 같은 기준이 된다."""
+        c = np.asarray(corners, float).reshape(4, 2)
+        side_px = float(np.mean([np.linalg.norm(c[(i+1) % 4] - c[i]) for i in range(4)]))
+        rel = rep / side_px if side_px > 1e-6 else 9.99
+        ok = (rep <= self.eih_reproj_max_px) and (rel <= self.eih_reproj_max_rel)
+        if not ok:
+            self.eih_rej_rep += 1
+            if self.eih_rej_rep % 30 == 1:
+                print(f"    [eih 게이트 기각] {tag} rep={rep:.2f}px "
+                      f"(상한 {self.eih_reproj_max_px:.1f}px) "
+                      f"rel={rel*100:.1f}% (상한 {self.eih_reproj_max_rel*100:.1f}%) "
+                      f"마커변={side_px:.0f}px — {self.eih_rej_rep}회째")
+        return ok, side_px, rel
+
     # ── 손목캠 디버그 뷰(eih_debug_view=true일 때만) ────────────────────────
     def _dbg_frame(self, msg: Image):
         """디버그 뷰가 꺼져 있으면 None — 켜져 있을 때만 프레임을 BGR로 복사한다."""
@@ -376,10 +420,13 @@ class VisionNode(Node):
         if dbg is not None and ids is not None:
             cv2.aruco.drawDetectedMarkers(dbg, cs, ids)
 
-        # place 지그 상판 마커(ID6) — 별도 토픽으로 항상 같이 처리
-        if PLACE_TOP_MARKER_ID in id_list:
-            _sol = self._solve_top_facing(cs[id_list.index(PLACE_TOP_MARKER_ID)].reshape(4, 2))
-        else:
+        # place 지그 상판 마커 — 별도 토픽으로 항상 같이 처리
+        _sol, _pc = None, None
+        if self.place_marker_id in id_list:
+            _pc = cs[id_list.index(self.place_marker_id)].reshape(4, 2)
+            _sol = self._solve_top_facing(_pc, self.place_top_pts)
+        if _sol is not None and not self._eih_reproj_ok(
+                _pc, _sol[2], f"place ID{self.place_marker_id}")[0]:
             _sol = None
         if _sol is not None:
             _p_usd = self._eih_axis_diag @ _sol[0]
@@ -404,6 +451,14 @@ class VisionNode(Node):
             return
         best, rvec, rep = sol
 
+        gate_ok, side_px, rel = self._eih_reproj_ok(corners, rep, f"pick ID{self.pick_marker_id}")
+        if not gate_ok:
+            self.pub_eih.publish(Float32MultiArray(data=pack_eih_marker(0, 0, 0, False)))
+            self._dbg_publish(dbg, msg, [
+                hdr, f"REJECT rep={rep:.2f}px rel={rel*100:.1f}% side={side_px:.0f}px"], (0, 0, 255))
+            return
+        self.eih_rep_max = max(self.eih_rep_max, rep)
+
         p_usd = self._eih_axis_diag @ best
         p_body = R_bc @ p_usd + t_bc
         self.pub_eih.publish(Float32MultiArray(
@@ -414,7 +469,8 @@ class VisionNode(Node):
         if self.eih_hit % EIH_PRINT_EVERY == 1:
             print(f"    [진단-eih] ID{self.pick_marker_id} size={self.pick_marker_size*1000:.1f}mm  "
                   f"cam=({best[0]*1000:+.0f},{best[1]*1000:+.0f},{best[2]*1000:+.0f})mm "
-                  f"d={float(np.linalg.norm(best))*1000:.1f}mm rep={rep:.2f}px  "
+                  f"d={float(np.linalg.norm(best))*1000:.1f}mm rep={rep:.2f}px"
+                  f"(rel {rel*100:.1f}%, 기각누적 {self.eih_rej_rep})  "
                   f"body=({p_body[0]*1000:+.1f},{p_body[1]*1000:+.1f},{p_body[2]*1000:+.1f})mm")
 
         if dbg is not None:

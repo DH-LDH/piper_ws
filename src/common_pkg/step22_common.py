@@ -325,6 +325,18 @@ def unpack_eih_marker(data):
     x, y, z, valid = data
     return float(x), float(y), float(z), bool(valid)
 
+def pack_grip_state(stroke_mm, effort, contact, holding, active):
+    """gripper → arm. [stroke_mm, effort, contact, holding, active]
+    stroke_mm: 현재 그리퍼 개구부[mm](실물=grippers_angle, sim=joint7-joint8).
+    effort: 접촉 저항 크기(실물 N·m, sim N — 단위가 달라 노드 안에서만 비교할 것).
+    파지 성공 판정(arm_node._verify_by_gripper)이 이 셋을 같이 본다."""
+    return [float(stroke_mm), float(effort),
+            1.0 if contact else 0.0, 1.0 if holding else 0.0, 1.0 if active else 0.0]
+
+def unpack_grip_state(data):
+    stroke_mm, effort, contact, holding, active = data
+    return (float(stroke_mm), float(effort), bool(contact), bool(holding), bool(active))
+
 def pack_joint_hold_target(q6):
     """arm → plant (wait 위상 관절목표, 6개)."""
     return [float(v) for v in q6]

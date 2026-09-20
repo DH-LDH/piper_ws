@@ -12,7 +12,9 @@ from rclpy.node import Node
 from std_msgs.msg import Float32, Float32MultiArray, Bool, String, Int32
 from sensor_msgs.msg import JointState
 
-from step22_common import GRIP_JOINT_L, GRIP_JOINT_R, GRIP_STROKE_MAX
+from step22_common import (
+    GRIP_JOINT_L, GRIP_JOINT_R, GRIP_STROKE_MAX, pack_grip_state,
+)
 
 # ── 사용자 조정 파라미터 ─────────────────────────────────────────────────────
 
@@ -66,9 +68,14 @@ class GripperNode(Node):
 
         self.pub_gripper_cmd = self.create_publisher(JointState, "/mir/gripper_cmd", 10)
         self.pub_done = self.create_publisher(Bool, "/gripper/done", 1)
+        # 실물(piper_gripper_node)과 같은 계약 — arm_node의 그리퍼 기반 파지 판정이
+        # sim/실물 어느 쪽에서도 같은 코드로 돌게 한다(verify_mode=gripper/both).
+        self.pub_grip_state = self.create_publisher(Float32MultiArray, "/gripper/grip_state", 10)
+
         self.pub_status = self.create_publisher(String, "/gripper/status", 5)
 
         self.F_pads = None  # pad별 접촉력(비대칭 잼 확인용)
+        self.stroke_mm = None  # 실개구부[mm] = joint7 - joint8(미러링이라 2×joint7)
 
         self.create_subscription(JointState, "/mir/joint_states", self._on_joint_states, 10)
         self.create_subscription(Float32, "/mir/contact_force", self._on_contact_force, 10)
@@ -86,6 +93,13 @@ class GripperNode(Node):
                 self.grip_names = names
                 self.grip_base_targets = _grip_base_targets(names)
                 self.get_logger().info(f"그립 관절 {len(names)}개 확인: {names}")
+        if GRIP_JOINT_L in msg.name and GRIP_JOINT_R in msg.name:
+            pl = float(msg.position[msg.name.index(GRIP_JOINT_L)])
+            pr = float(msg.position[msg.name.index(GRIP_JOINT_R)])
+            self.stroke_mm = abs(pl - pr) * 1000.0
+            self.pub_grip_state.publish(Float32MultiArray(data=pack_grip_state(
+                self.stroke_mm, self.F_con if self.F_con is not None else 0.0,
+                self.grip_contact, self.holding, self.active)))
 
     def _on_contact_force(self, msg: Float32):
         self.F_con = float(msg.data)

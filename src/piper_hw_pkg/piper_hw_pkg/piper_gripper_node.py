@@ -11,6 +11,8 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray, Bool, String, Int32
 
+from step22_common import pack_grip_state
+
 # hardware_pkg/gripper_node.py(sim, PhysX 접촉력 기반 α-SMC)와 같은 제어식을 그대로 쓰되
 # I/O만 실물(piper_driver_node가 중계하는 /piper/gripper_feedback·target_cmd)로 교체한 버전.
 # ── 사용자 조정 파라미터 ─────────────────────────────────────────────────────
@@ -60,9 +62,13 @@ class PiperGripperNode(Node):
         self.n_samples = 0
         self.done_sent = False
         self.holding = False
+        self.stroke_mm = None   # 그리퍼 실개구부[mm] — arm_node의 파지 판정 입력
 
         self.pub_target = self.create_publisher(Float32MultiArray, "/piper/gripper_target_cmd", 10)
         self.pub_done = self.create_publisher(Bool, "/gripper/done", 1)
+        # 파지 성공 판정용 상시 발행 — /gripper/done(1회성 접촉 bool)만으로는
+        # "닫히긴 했는데 사이에 아무것도 없다"를 구분 못 한다(스트로크가 그걸 말해준다).
+        self.pub_grip_state = self.create_publisher(Float32MultiArray, "/gripper/grip_state", 10)
         self.pub_status = self.create_publisher(String, "/gripper/status", 5)
 
         self.create_subscription(Float32MultiArray, "/piper/gripper_feedback", self._on_feedback, 10)
@@ -80,9 +86,12 @@ class PiperGripperNode(Node):
         self.get_logger().info("기동 시 그리퍼 오픈")
 
     def _on_feedback(self, msg: Float32MultiArray):
-        _angle_mm, effort_nm, foc = msg.data
+        angle_mm, effort_nm, foc = msg.data
         self.F_con = abs(float(effort_nm))  # 닫는 방향 저항은 음수로 들어옴(2026-09-17 실기 확인) — 크기만 사용
         self.foc_status = int(foc)
+        self.stroke_mm = float(angle_mm)
+        self.pub_grip_state.publish(Float32MultiArray(data=pack_grip_state(
+            self.stroke_mm, self.F_con, self.grip_contact, self.holding, self.active)))
 
     def _publish_target(self, alpha):
         angle_mm = (1.0 - alpha) * GRIPPER_STROKE_MAX_M * 1000.0
@@ -156,8 +165,11 @@ class PiperGripperNode(Node):
             if not self.grip_contact:
                 print("  [gripper] ★ 접촉 미감지 — 헛집음 가능성")
             _fin = self.F_con
+            _stk = self.stroke_mm
             print(f"    ★★ [실접촉토크 요약] 샘플 {self.n_samples}  peak {self.cf_peak:.2f}N·m  "
-                  f"최종 {_fin if _fin is None else round(_fin,2)}N·m  foc_status=0b{self.foc_status:08b}")
+                  f"최종 {_fin if _fin is None else round(_fin,2)}N·m  "
+                  f"개구부 {'-' if _stk is None else f'{_stk:.1f}mm'}  "
+                  f"foc_status=0b{self.foc_status:08b}")
             self.pub_done.publish(Bool(data=self.grip_contact))
             if settle_ok:
                 self.holding = True
@@ -167,7 +179,8 @@ class PiperGripperNode(Node):
 
     def _publish_status(self):
         self.pub_status.publish(String(
-            data=f"alpha={self.grip_alpha:.3f} F_contact="
+            data=f"alpha={self.grip_alpha:.3f} stroke="
+                 f"{self.stroke_mm if self.stroke_mm is not None else -1:.1f}mm F_contact="
                  f"{self.F_con if self.F_con is not None else -1:.2f} "
                  f"contact={self.grip_contact} active={self.active}"))
 

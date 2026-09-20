@@ -38,6 +38,15 @@ def generate_launch_description():
         DeclareLaunchArgument("move_spd_rate_ctrl", default_value="5"),  # [%]
         DeclareLaunchArgument("eih_pick_marker_id", default_value="0"),  # 실물 픽 타겟 마커 ID
         DeclareLaunchArgument("eih_pick_marker_size_m", default_value="0.034"),
+        # 선반 place 마커 — 픽과 같은 34mm. 크기를 틀리면 solvePnP 거리가 그 비율로
+        # 통째로 틀어진다(예전엔 sim 기본 20mm로 풀려서 0.59배로 가깝게 나왔음).
+        DeclareLaunchArgument("eih_place_marker_id", default_value="3"),
+        DeclareLaunchArgument("eih_place_marker_size_m", default_value="0.034"),
+        # 손목캠 재투영 게이트 — 근접 관측이라 px 절대값보다 "마커 크기 대비 비율"이 기준.
+        # 기본값은 거의 안 거르는 관측용 값이다(detect엔 타임아웃이 없어 잘못 조이면
+        # 픽이 멈춘다). [진단-eih]의 rel(%)을 한 번 보고 그 2배쯤으로 내릴 것.
+        DeclareLaunchArgument("eih_reproj_max_px", default_value="30.0"),
+        DeclareLaunchArgument("eih_reproj_max_rel", default_value="0.20"),
         # 손목캠 외부파라미터(link6→eih_cam) — eih_cam_calib.py가 뽑아주는 값.
         DeclareLaunchArgument("cam_tcp_offset_x", default_value="-0.085"),
         DeclareLaunchArgument("cam_tcp_offset_y", default_value="-0.010"),
@@ -60,6 +69,37 @@ def generate_launch_description():
         DeclareLaunchArgument("grasp_depth_extra", default_value="0.008"),   # 현재 타겟 16.36mm 큐브
         # 근접 재검출이 "더 낮다"고 할 때 최초 검출(hover 원거리 관측)보다 아래로 허용하는 한계.
         DeclareLaunchArgument("grasp_z_below_anchor_max", default_value="0.02"),
+        # 도달 판정 허용오차 = 곧 파지 깊이 오차. 기본 4mm는 sim의 5cm 큐브 기준이라
+        # 16.36mm 타겟(깊이 8mm)에는 과하다 — z는 따로 1.5mm로 좁게 본다.
+        DeclareLaunchArgument("grasp_arrive_tol", default_value="0.004"),
+        DeclareLaunchArgument("grasp_arrive_z_tol", default_value="0.0015"),
+        # 물리 도달 대기 상한[스텝, 60Hz]. 5% 속도면 100mm 이동에만 4초 이상 걸린다 —
+        # 900스텝(15초)으로 넉넉히. 여기서 포기하면 덜 문 채로 그리퍼가 닫힌다.
+        DeclareLaunchArgument("arrive_max_wait", default_value="900"),
+        # 파지 판정 — 실기엔 차체캠이 없어 chassis 모드는 "미검출=성공"으로 빠진다.
+        # 차체캠을 달면 both로 바꿔 두 판정을 교차검증할 것.
+        DeclareLaunchArgument("verify_mode", default_value="gripper"),
+        # 타겟 치수 — 폭은 그리퍼 개구부 판정, 높이는 place 릴리즈 높이 계산에 쓴다.
+        DeclareLaunchArgument("obj_width_m", default_value="0.01636"),
+        DeclareLaunchArgument("obj_height_m", default_value="0.01636"),
+        # place — 마커 중심에서 팔 베이스 쪽으로 한 변(34mm) 당긴 곳에 놓는다(마커를
+        # 덮지 않게). 릴리즈는 물체 바닥이 선반면에서 5mm 뜬 높이에서.
+        DeclareLaunchArgument("place_point_mode", default_value="marker_inset"),
+        DeclareLaunchArgument("place_inset_m", default_value="0.034"),
+        DeclareLaunchArgument("place_release_gap", default_value="0.005"),
+        DeclareLaunchArgument("place_freeze_after_detect", default_value="true"),
+        # sim의 30°는 sim 선반 높이 전용 — 실물은 픽과 같은 수직 접근이 기본.
+        DeclareLaunchArgument("place_pitch_deg", default_value="0.0"),
+        # place 마커가 대략 있을 body_link 위치. 선반이 픽 타겟과 같은 선반이라
+        # 기본값은 픽 hover 위치(obj_expected_*)를 그대로 물려받는다 — 어차피 여기로
+        # 먼저 가서 마커를 찾고 place_detect가 실제 위치로 보정하는 출발점일 뿐이다.
+        # 선반을 옮기거나 마커가 화각에 안 들어오면 이 인자만 따로 덮어쓰면 된다.
+        DeclareLaunchArgument("place_expected_x_body",
+                              default_value=LaunchConfiguration("obj_expected_x_body")),
+        DeclareLaunchArgument("place_expected_y_body",
+                              default_value=LaunchConfiguration("obj_expected_y_body")),
+        DeclareLaunchArgument("place_expected_z_body",
+                              default_value=LaunchConfiguration("obj_expected_z_body")),
         # 캘리브레이션 중엔 false로 — detect 시점 파지점을 고정해서 팔 거동을 결정적으로 만든다.
         DeclareLaunchArgument("pre_redetect", default_value="true"),
         DeclareLaunchArgument("grasp_eih_track", default_value="true"),
@@ -82,7 +122,8 @@ def generate_launch_description():
 
         Node(package="piper_hw_pkg", executable="piper_driver_node",
              parameters=[{"really_enable": really_enable, "can_name": can_name,
-                          "move_spd_rate_ctrl": move_spd_rate_ctrl}],
+                          "move_spd_rate_ctrl": move_spd_rate_ctrl,
+                          "place_pitch_deg": LaunchConfiguration("place_pitch_deg")}],
              output="screen"),
         Node(package="piper_hw_pkg", executable="piper_gripper_node", output="screen"),
         Node(package="piper_hw_pkg", executable="piper_eih_camera_node",
@@ -97,6 +138,10 @@ def generate_launch_description():
         Node(package="vision_pkg", executable="vision_node",
              parameters=[{"eih_pick_marker_id": eih_pick_marker_id,
                           "eih_pick_marker_size_m": eih_pick_marker_size_m,
+                          "eih_place_marker_id": LaunchConfiguration("eih_place_marker_id"),
+                          "eih_place_marker_size_m": LaunchConfiguration("eih_place_marker_size_m"),
+                          "eih_reproj_max_px": LaunchConfiguration("eih_reproj_max_px"),
+                          "eih_reproj_max_rel": LaunchConfiguration("eih_reproj_max_rel"),
                           "eih_axis_flip": False,
                           "eih_y_flip": eih_y_flip,
                           "corner_refine": corner_refine,
@@ -115,8 +160,22 @@ def generate_launch_description():
                           "approach_dist": LaunchConfiguration("approach_dist"),
                           "grasp_depth_extra": LaunchConfiguration("grasp_depth_extra"),
                           "grasp_z_below_anchor_max": LaunchConfiguration("grasp_z_below_anchor_max"),
+                          "grasp_arrive_tol": LaunchConfiguration("grasp_arrive_tol"),
+                          "grasp_arrive_z_tol": LaunchConfiguration("grasp_arrive_z_tol"),
+                          "arrive_max_wait": LaunchConfiguration("arrive_max_wait"),
                           "pre_redetect": LaunchConfiguration("pre_redetect"),
                           "grasp_eih_track": LaunchConfiguration("grasp_eih_track"),
+                          "verify_mode": LaunchConfiguration("verify_mode"),
+                          "obj_width_m": LaunchConfiguration("obj_width_m"),
+                          "obj_height_m": LaunchConfiguration("obj_height_m"),
+                          "place_point_mode": LaunchConfiguration("place_point_mode"),
+                          "place_inset_m": LaunchConfiguration("place_inset_m"),
+                          "place_release_gap": LaunchConfiguration("place_release_gap"),
+                          "place_freeze_after_detect": LaunchConfiguration("place_freeze_after_detect"),
+                          "place_pitch_deg": LaunchConfiguration("place_pitch_deg"),
+                          "place_expected_x_body": LaunchConfiguration("place_expected_x_body"),
+                          "place_expected_y_body": LaunchConfiguration("place_expected_y_body"),
+                          "place_expected_z_body": LaunchConfiguration("place_expected_z_body"),
                           "step_confirm": step_confirm}],
              output="screen"),
     ])
