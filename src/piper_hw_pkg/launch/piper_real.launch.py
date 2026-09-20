@@ -23,7 +23,6 @@ def generate_launch_description():
     obj_expected_y_body = LaunchConfiguration("obj_expected_y_body")
     obj_expected_z_body = LaunchConfiguration("obj_expected_z_body")
     step_confirm = LaunchConfiguration("step_confirm")
-    eih_y_flip = LaunchConfiguration("eih_y_flip")
     corner_refine = LaunchConfiguration("corner_refine")
     debug_view = LaunchConfiguration("debug_view")
     arm = LaunchConfiguration("arm")
@@ -136,7 +135,6 @@ def generate_launch_description():
         DeclareLaunchArgument("grasp_eih_track", default_value="true"),
         DeclareLaunchArgument("step_confirm", default_value="false",
                               description="true면 phase 전환마다 멈추고 step_confirm.py의 Enter 대기"),
-        DeclareLaunchArgument("eih_y_flip", default_value="false"),  # 손목캠 좌우(Y) 부호 반전 테스트용
         DeclareLaunchArgument("corner_refine", default_value="subpix"),  # "subpix" 또는 "none"
         # 손목캠 검출 확인용 창 — vision_node가 실제로 쓰는 검출/포즈를 그대로 그린다
         # (별도 eih_marker_debug_node는 자체 검출이라 파이프라인 값과 다를 수 있음).
@@ -173,8 +171,6 @@ def generate_launch_description():
                           "eih_place_marker_size_m": LaunchConfiguration("eih_place_marker_size_m"),
                           "eih_reproj_max_px": LaunchConfiguration("eih_reproj_max_px"),
                           "eih_reproj_max_rel": LaunchConfiguration("eih_reproj_max_rel"),
-                          "eih_axis_flip": False,
-                          "eih_y_flip": eih_y_flip,
                           "corner_refine": corner_refine,
                           "eih_debug_view": debug_view}],
              output="screen"),

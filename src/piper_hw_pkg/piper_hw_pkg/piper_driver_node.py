@@ -30,31 +30,24 @@ except ImportError:
 
 # ── 사용자 조정 파라미터(ROS 파라미터로도 덮어쓰기 가능) ─────────────────────
 
-CAN_NAME_DEFAULT = "can_piper"  # udev 규칙으로 고정한 이름(USB-CAN 동글) — can0/can1은 부팅마다 순서 바뀜
-REALLY_ENABLE_DEFAULT = False   # True로 명시해야 EnableArm/모션 명령을 실제로 보낸다(첫 기동 안전장치)
-ENABLE_ARM_MOTION_DEFAULT = True  # False면 really_enable=true여도 JointCtrl/EndPoseCtrl은 안 보냄(그리퍼만 테스트할 때 씀)
-MOVE_SPD_RATE_DEFAULT = 5       # [%] 실기 검증 중 확정 — 필요시 파라미터로 올릴 것
-TICK_HZ = 60.0                  # 상태기계·그리퍼의 시간 상수가 전부 스텝 수라(900스텝=15초) 이 값이 곧 시간 기준
+CAN_NAME_DEFAULT = "can_piper"  # udev 고정
+REALLY_ENABLE_DEFAULT = False   # 안전장치
+ENABLE_ARM_MOTION_DEFAULT = True  # 그리퍼만 테스트할 때
+MOVE_SPD_RATE_DEFAULT = 5       # 로봇팔 속도
+TICK_HZ = 60.0                  # 900스텝=15초
 
-# 파지 시 그리퍼를 어느 롤로 들이댈지. IK를 푸는 주체(펌웨어)와 무관하게 파지 기하
-# 자체가 정하는 값이다.
+
 GRASP_ROLL_DEG = -90.0
 
-# arm_node가 이 phase일 때는 관절 직접 지령(JointCtrl, MOVE J)을 쓴다.
-# 나머지 phase는 /arm/cartesian_target을 EndPoseCtrl(MOVE L)로 스트리밍한다.
-# place_done도 관절유지 — arm_node가 "최종 자세"를 여기서 지령한다(예전엔 아무 명령도
-# 안 보내서 place_home의 마지막 명령을 그대로 물려받기만 했다).
+
 JOINT_HOLD_PHASES = ("wait", "place_ready", "place_home", "place_done")
-# place 자세(place_pitch_deg)를 쓰는 구간 — 릴리즈/후퇴까지 포함해야 한다. 빼면 그리퍼를
-# 여는 바로 그 순간 손목이 픽 자세로 홱 돌아 방금 놓은 물체를 친다.
 PLACE_MARKER_PHASES = ("place_hover", "place_detect", "place_descend",
                        "place_release", "place_retreat")
 CARTESIAN_PHASES = ("hover", "pre", "grasp", "lift", "place_lower",
                      "place_hover", "place_detect", "place_descend",
                      "place_release", "place_retreat")
 
-# GetArmStatus().arm_status가 이 값이면 새 모션 명령을 멈추고 경고만 남긴다(자동복구 안 함).
-# 0x01 비상정지, 0x02 IK 무해, 0x03 특이점, 0x04 관절한계초과, 0x07 충돌.
+
 FAULT_CODES = {1, 2, 3, 4, 7}
 
 # ── 조정 파라미터 끝 ─────────────────────────────────────────────────────────
@@ -108,8 +101,6 @@ class PiperDriverNode(Node):
         self.declare_parameter("really_enable", REALLY_ENABLE_DEFAULT)
         self.declare_parameter("enable_arm_motion", ENABLE_ARM_MOTION_DEFAULT)
         self.declare_parameter("move_spd_rate_ctrl", MOVE_SPD_RATE_DEFAULT)
-        # arm_node의 같은 이름 파라미터와 반드시 같은 값을 줄 것 — 한쪽만 바꾸면
-        # 목표점(arm_node)과 손목 자세(driver)가 서로 다른 pitch를 쓴다.
         self.declare_parameter("place_pitch_deg", PLACE_PITCH_DEG)
         can_name = self.get_parameter("can_name").value
         self.really_enable = bool(self.get_parameter("really_enable").value)
@@ -127,9 +118,6 @@ class PiperDriverNode(Node):
         self.joint_hold_target = np.array(SEARCH_Q, float)
         self.cartesian_target = None
         self._last_move_mode = None  # ModeCtrl 중복호출 방지(CAN 트래픽 절약)
-        # ★ 같은 목표를 60Hz로 재전송하면 펌웨어가 매 틱 MOVE L 궤적을 새로 시작해
-        # 가속 램프가 리셋된다. 저속 설정에서는 램프 구간만 반복하다 팔이 사실상
-        # 전진하지 못한다. 그래서 값이 "바뀐 경우에만" 보낸다 — 유지는 펌웨어 몫이다.
         self._last_endpose = None
         self._last_jointctrl = None
         self._cmd_sent = 0; self._cmd_skipped = 0
@@ -178,9 +166,6 @@ class PiperDriverNode(Node):
         phase = (msg.data.split(" ")[0].split("=")[-1]
                   if "phase=" in msg.data else msg.data)
         if phase != self.arm_phase:
-            # 단계가 바뀌면 중복생략 캐시를 비운다. 값이 직전 단계와 같아도(예: 기동
-            # 시 'wait'의 SEARCH_Q와 'place_home'의 SEARCH_Q) 한 번은 다시 보내야
-            # 한다 — 안 그러면 그 단계의 명령이 통째로 안 나가고 팔이 제자리에 선다.
             self._last_endpose = None
             self._last_jointctrl = None
         self.arm_phase = phase
@@ -241,9 +226,6 @@ class PiperDriverNode(Node):
                 self.piper.EndPoseCtrl(*cmd)
             else:
                 self._cmd_skipped += 1
-        # 그 외(detect/verify/grip/place_wait 등)는 명령을 안 보낸다 — 팔은 마지막
-        # 목표를 유지한다. 캐시 비우기는 _on_arm_status()의 단계 전환에서 처리.
-        # 그 외(detect/verify/place_wait 등)는 팔이 마지막 목표를 유지 — 새 명령 없음.
 
     def _publish_cmd_stats(self):
         self.get_logger().info(
@@ -277,8 +259,6 @@ class PiperDriverNode(Node):
                   float(gs.status_code)]))
 
     def destroy_node(self):
-        # 종료 시 DisableArm을 자동 호출하지 않는다 — 브레이크 미보유 축이 있다면
-        # 무동력 낙하 위험(문서상 근거 불충분). 마지막 자세 유지가 기본 동작.
         super().destroy_node()
 
 
@@ -291,8 +271,6 @@ def main():
         pass
     finally:
         node.destroy_node()
-        # launch가 SIGINT를 보내면 rclpy 시그널 핸들러가 이미 컨텍스트를 내려서
-        # 여기서 또 부르면 RCLError를 뱉는다(동작엔 영향 없지만 매번 traceback).
         if rclpy.ok():
             rclpy.shutdown()
 
