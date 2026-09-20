@@ -413,7 +413,7 @@ class VisionNode(Node):
         out.data = array.array("B", dbg.tobytes())
         self.pub_eih_debug.publish(out)
 
-    # ── 끝단 카메라: 윗면 마커(ID4) → 몸체좌표 위치 ─────────────────────────
+    # ── 끝단 카메라: 윗면 마커(ID0) → 몸체좌표 위치 ─────────────────────────
     def _on_eih_image(self, msg: Image):
         if self.eih_K is None: return
         dbg = self._dbg_frame(msg)
