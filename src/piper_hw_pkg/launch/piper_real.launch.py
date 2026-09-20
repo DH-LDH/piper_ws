@@ -69,6 +69,12 @@ def generate_launch_description():
         DeclareLaunchArgument("grasp_depth_extra", default_value="0.008"),   # 현재 타겟 16.36mm 큐브
         # 근접 재검출이 "더 낮다"고 할 때 최초 검출(hover 원거리 관측)보다 아래로 허용하는 한계.
         DeclareLaunchArgument("grasp_z_below_anchor_max", default_value="0.02"),
+        # 재검출 수용 한계 — 축별로 나눴다. XY 오검출은 헛집고 재시도하면 그만이지만
+        # z가 아래로 틀리면 손가락이 테이블을 찍으므로 z만 좁게 둔다. 파지 직전
+        # (렌즈~마커 120mm)에는 화각 여유가 85mm라 XY는 이 값보다 화각이 먼저 막는다.
+        DeclareLaunchArgument("redetect_max_xy", default_value="0.12"),
+        DeclareLaunchArgument("grasp_jump_max_xy", default_value="0.15"),
+        DeclareLaunchArgument("eih_z_up_max", default_value="0.03"),
         # 도달 판정 허용오차 = 곧 파지 깊이 오차. 기본 4mm는 sim의 5cm 큐브 기준이라
         # 16.36mm 타겟(깊이 8mm)에는 과하다 — z는 따로 1.5mm로 좁게 본다.
         DeclareLaunchArgument("grasp_arrive_tol", default_value="0.004"),
@@ -185,6 +191,9 @@ def generate_launch_description():
                           "approach_dist": LaunchConfiguration("approach_dist"),
                           "grasp_depth_extra": LaunchConfiguration("grasp_depth_extra"),
                           "grasp_z_below_anchor_max": LaunchConfiguration("grasp_z_below_anchor_max"),
+                          "redetect_max_xy": LaunchConfiguration("redetect_max_xy"),
+                          "grasp_jump_max_xy": LaunchConfiguration("grasp_jump_max_xy"),
+                          "eih_z_up_max": LaunchConfiguration("eih_z_up_max"),
                           "grasp_arrive_tol": LaunchConfiguration("grasp_arrive_tol"),
                           "grasp_arrive_z_tol": LaunchConfiguration("grasp_arrive_z_tol"),
                           "arrive_max_wait": LaunchConfiguration("arrive_max_wait"),

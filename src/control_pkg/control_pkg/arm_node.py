@@ -39,13 +39,21 @@ GRASP_DEPTH_EXTRA = 0.010  # [m] 마커 평면보다 더 내려가는 깊이 (la
 # 최초 검출(detect) 타당성 게이트 — 기대 위치에서 너무 벗어난 검출은 오검출로 기각
 DETECT_MAX_ERR = 0.25  # [m] 2026-09-17: obj_expected_y_body 추정치가 부정확해서 완화
 PRE_REDETECT     = True
-PRE_REDETECT_MAX = 0.06  # [m] 1회 보정 상한(넘으면 오검출로 보고 기각)
+# 재검출 수용 한계를 축별로 나눈다 — 오검출이 통과했을 때의 결과가 축마다 다르기 때문.
+# XY로 틀리면 헛집고 재시도하면 그만이지만, z로 아래로 틀리면 손가락이 테이블을 찍는다.
+# 그래서 XY는 관대하게(물체가 움직여도 따라가게), z는 좁게 둔다. 참고로 파지 직전
+# (렌즈~마커 120mm)에는 화각 여유가 85mm라 XY는 이 한계보다 화각이 먼저 막는다.
+PRE_REDETECT_MAX_XY   = 0.12  # [m] pre 구간 XY 누적 허용(launch: redetect_max_xy)
+GRASP_JUMP_MAX_XY     = 0.15  # [m] grasp 구간 XY 누적 허용(launch: grasp_jump_max_xy)
+EIH_Z_UP_MAX          = 0.03  # [m] anchor보다 "위로" 허용하는 한계(launch: eih_z_up_max)
+# z 아래 방향은 기존 2중 장치를 그대로 쓴다:
+#   grasp_z_below_anchor_max(20mm)까지는 clamp로 따라가고, GRASP_Z_DROP_MAX(50mm)를
+#   넘게 낮으면 "떨어진 물체"로 보고 프레임 자체를 기각한다.
 
 # GRASP 하강 중 실시간 추종
 GRASP_CORR_ENABLED  = True   # 차체캠 델타보정 — 하강 중 AMR 드리프트를 따라감
 GRASP_CORR_JUMP_MAX = 0.08   # [m] 직전 대비 점프가 이보다 크면 기각(마커 면 전환 방어)
 GRASP_EIH_TRACK_ENABLED = True   # 손목캠 재검출 — 하강 중에도 윗면 마커를 다시 재서 파지점 갱신
-GRASP_EIH_JUMP_MAX      = 0.08   # [m] 최초 detect 파지점 대비 누적 허용 오차(오검출 방어)
 GRASP_Z_DROP_MAX        = 0.05   # [m] 최초 검출보다 이보다 더 낮은 z는 "벨트에서 떨어진 물체"로 기각
 # 최초 검출(anchor)은 hover 높이의 원거리 관측이라 z가 높게 잡히기 쉽다 — 근접 재검출이
 # 그보다 낮다고 말하면 이 값까지는 따라 내려간다(0이면 예전처럼 anchor 아래로 안 감).
@@ -56,7 +64,7 @@ GRASP_Z_BELOW_ANCHOR_MAX = 0.02  # [m] (launch: grasp_z_below_anchor_max)
 # 내리는 단순 경로(PLACE_LOWER_DIST)로 대체했다. 아래 상수는 그 보존된 경로가
 # 재활성화될 때를 위해 남겨둔다.
 PLACE_DETECT_TIMEOUT   = 900    # [스텝, 15s] 이 안에 상판 마커를 못 보면 도킹시 추정치로 진행
-PLACE_REDETECT_MAX     = 0.06   # [m] 1회 보정 상한(PRE_REDETECT_MAX와 동일 근거)
+PLACE_REDETECT_MAX     = 0.06   # [m] 1회 보정 상한(픽의 재검출 한계와 동일 근거)
 PLACE_Z_DROP_MAX        = 0.05  # [m] 최초 검출보다 낮은 z는 오검출로 기각(GRASP_Z_DROP_MAX 대응)
 # 관절 이동(SEARCH_Q 복귀)은 MOVE J라서 cartesian 단계들과 달리 도달 확인 수단이 없다 —
 # 시간으로만 기다린다. 5% 속도에서 SEARCH_Q까지는 큰 이동이라 아래 기본값(2.5~3초)은
@@ -163,6 +171,12 @@ class ArmNode(Node):
             self.declare_parameter("grasp_arrive_tol", GRASP_ARRIVE_TOL).value)
         self.grasp_arrive_z_tol = float(
             self.declare_parameter("grasp_arrive_z_tol", GRASP_ARRIVE_Z_TOL).value)
+        self.redetect_max_xy = float(
+            self.declare_parameter("redetect_max_xy", PRE_REDETECT_MAX_XY).value)
+        self.grasp_jump_max_xy = float(
+            self.declare_parameter("grasp_jump_max_xy", GRASP_JUMP_MAX_XY).value)
+        self.eih_z_up_max = float(
+            self.declare_parameter("eih_z_up_max", EIH_Z_UP_MAX).value)
         self.arrive_max_wait = int(
             self.declare_parameter("arrive_max_wait", GRASP_ARRIVE_MAX_WAIT).value)
         # 손목캠 재검출 추종 on/off — 캘리브레이션 중엔 꺼서 detect 시점 목표를 고정시킨다.
@@ -779,11 +793,11 @@ class ArmNode(Node):
                 self.pre_miss_run = 0
                 g2 = self._grasp_point(self.eih_new)
                 d = float(np.linalg.norm(g2 - self.ml_grasp))          # 직전 대비(로그용)
-                d_anc = float(np.linalg.norm(g2 - self.ml_grasp_anchor))  # 최초검출 대비(수용 판정)
-                dropped = (self.ml_grasp_anchor[2] - g2[2]) > GRASP_Z_DROP_MAX
-                if d_anc <= PRE_REDETECT_MAX and not dropped:
+                d_anc = float(np.linalg.norm(g2 - self.ml_grasp_anchor))  # 최초검출 대비(로그용)
+                ok, why = self._eih_accept(g2, self.redetect_max_xy)
+                if ok:
                     # z는 최초 검출(anchor)보다 아래로 내려가지 않게 clamp — 근접
-                    # 재검출 노이즈가 누적돼 벨트를 파고드는 것 방지(XY는 그대로 추종).
+                    # 재검출 노이즈가 누적돼 바닥을 파고드는 것 방지(XY는 그대로 추종).
                     g2[2] = max(g2[2], self.ml_grasp_anchor[2] - self.grasp_z_below_anchor_max)
                     self.ml_grasp = g2
                     self.ml_target = g2 - GRASP_APPROACH_DIR * self.approach_dist
@@ -792,6 +806,8 @@ class ArmNode(Node):
                     self.pre_corr_max = max(self.pre_corr_max, d_anc)  # anchor 대비 최대 이동량
                 else:
                     self.pre_rej_n += 1
+                    if self.pre_rej_n % 30 == 1:
+                        print(f"    [PRE 재검출 기각] {why}  ({self.pre_rej_n}회째)")
             return
 
         if self.arm_phase == "grasp":
@@ -815,12 +831,10 @@ class ArmNode(Node):
             if self.grasp_eih_track and hit:
                 g2 = self._grasp_point(self.eih_new)
                 d = float(np.linalg.norm(g2 - self.ml_grasp_anchor))
-                dropped = (self.ml_grasp_anchor[2] - g2[2]) > GRASP_Z_DROP_MAX
-                if dropped and self.gr_eih_rej_n % 30 == 0:
-                    print(f"    [GRASP 안전기각] z={g2[2]*1000:.0f}mm가 최초검출 "
-                          f"{self.ml_grasp_anchor[2]*1000:.0f}mm보다 {GRASP_Z_DROP_MAX*1000:.0f}mm "
-                          f"이상 낮음 — 물체가 벨트에서 떨어진 것으로 보고 무시")
-                if d <= GRASP_EIH_JUMP_MAX and not dropped:
+                ok, why = self._eih_accept(g2, self.grasp_jump_max_xy)
+                if not ok and self.gr_eih_rej_n % 30 == 0:
+                    print(f"    [GRASP 재검출 기각] {why} (anchor 대비) — 무시")
+                if ok:
                     # z clamp: anchor보다 아래로는 안 내려간다(벨트 충돌 방지, PRE와 동일 논리)
                     z_lo = self.ml_grasp_anchor[2] - self.grasp_z_below_anchor_max
                     if g2[2] < z_lo:
@@ -838,6 +852,20 @@ class ArmNode(Node):
                         self.grasp_delta_last = np.zeros(2)
                 else:
                     self.gr_eih_rej_n += 1
+
+    def _eih_accept(self, g2, max_xy):
+        """재검출 파지점 g2를 수용할지 — (수용여부, 사유). anchor 대비 축별로 본다.
+        XY는 관대하게(물체 이동 추종), z는 좁게(테이블 충돌 방어)."""
+        anc = self.ml_grasp_anchor
+        d_xy = float(np.linalg.norm(g2[:2] - anc[:2]))
+        dz = float(g2[2] - anc[2])
+        if d_xy > max_xy:
+            return False, f"XY {d_xy*1000:.0f}mm > {max_xy*1000:.0f}mm"
+        if dz > self.eih_z_up_max:
+            return False, f"z +{dz*1000:.0f}mm > +{self.eih_z_up_max*1000:.0f}mm"
+        if -dz > GRASP_Z_DROP_MAX:
+            return False, f"z {dz*1000:.0f}mm (떨어진 물체)"
+        return True, ""
 
     def _on_step_confirm(self, msg: Bool):
         if msg.data:
