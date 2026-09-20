@@ -15,14 +15,14 @@ from tf2_ros import StaticTransformBroadcaster
 
 from step22_common import ARM_BASE_YAW_DEG
 
-# v1(AMR 없이 팔 단독)에서는 amr_node가 아예 안 돈다 — arm_node.py가 그래도 기다리는
-# /amr/lock(픽 시퀀스 개시)·/amr/place_lock(place 시퀀스 개시) 신호를 대신 쏴주는 최소
-# 스텁. "AMR이 이미 정위치에 도킹했다"는 v1의 전제(팔 고정 베이스)를 그대로 신호로 낸다.
-# body_link도 같은 이유로 여기서 정적으로 쏴준다 — 안 하면 vision_node의 body_link→eih_cam
-# TF 조회가 매번 실패해서 손목캠 마커 인식이 통째로 죽는다.
-# 2026-09-17 실기에서 확인: EndPoseCtrl 기준 X가 sim의 body_link Y(KEEP_DIST 전진방향)에
-# 대응함 — sim의 ARM_BASE_YAW_DEG(=90°, 팔이 AMR 몸체 기준 90도 돌아서 장착된 것)를 그대로
-# 반영해야 함(identity로 두면 X/Y가 뒤바뀜).
+# 팔이 고정 베이스에 단독으로 설치된 구성이라 이동대차가 없다. 그런데 arm_node는
+# 시퀀스 개시 신호(/amr/lock, /amr/place_lock)를 기다리므로, "이미 정위치에 있다"는
+# 전제를 그대로 신호로 쏴주는 최소 스텁이 필요하다.
+#
+# body_link TF도 여기서 정적으로 쏜다 — 없으면 vision_node의 body_link→eih_cam 조회가
+# 매번 실패해 손목캠 마커 인식이 통째로 죽는다. 이때 ARM_BASE_YAW_DEG(90°) 회전을
+# 반드시 넣어야 한다. 팔이 베이스 기준 90도 돌아 장착돼 있어서, identity로 두면
+# EndPoseCtrl의 X가 body_link Y(전진방향)에 대응하는 관계가 깨져 X/Y가 뒤바뀐다.
 
 STARTUP_LOCK_DELAY_SEC = 3.0   # 다른 노드들이 다 올라올 시간을 준다
 

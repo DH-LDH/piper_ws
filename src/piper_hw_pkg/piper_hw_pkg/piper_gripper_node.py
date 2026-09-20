@@ -13,19 +13,26 @@ from std_msgs.msg import Float32MultiArray, Bool, String, Int32
 
 from step22_common import pack_grip_state
 
-# hardware_pkg/gripper_node.py(sim, PhysX 접촉력 기반 α-SMC)와 같은 제어식을 그대로 쓰되
-# I/O만 실물(piper_driver_node가 중계하는 /piper/gripper_feedback·target_cmd)로 교체한 버전.
+# 그리퍼 α-SMC 힘제어.
+#
+# PiPER 그리퍼는 힘을 직접 지령할 수 없고 개구부(위치)만 받는다. 그래서 펌웨어가
+# 주는 토크 피드백을 보며 지령 개구부를 조절하는 외루프를 건다. 제어 변수 α는
+# "닫힘 정도"이고 개구부로 선형 사상된다 — _publish_target() 참고.
+#
+# I/O는 piper_driver_node가 중계한다(/piper/gripper_feedback, /piper/gripper_target_cmd).
 # ── 사용자 조정 파라미터 ─────────────────────────────────────────────────────
 
 GRIPPER_STROKE_MAX_M = 0.06  # [m] 완전히 열렸을 때 목표 개구부(펌웨어 최대치 70mm 이내)
 
-# α-SMC — 단위만 N(sim)→N·m(실물)로 바뀜. 목표 토크/경계층 등은 전부 자리표시자이며
-# 실물에서 grippers_effort 실측값을 보며 재튜닝해야 한다(sim 값을 그대로 옮길 근거 없음).
+# ★ 아래 SMC 상수는 아직 실측 기반이 아니다. 현재 타겟(16.36mm 큐브)에서 목표 토크에
+# 수렴하고 놓치지도 않는 것은 확인했으나, 물체 재질이나 무게가 바뀌면 재튜닝해야 한다.
+# 펌웨어가 grippers_effort를 어떻게 산출하는지 공개돼 있지 않아 절대 파지력과의
+# 대응도 모른다 — 정확한 파지력이 필요하면 로드셀로 한 번 대조할 것.
 SMC_ENABLED   = True
 SMC_F_TARGET  = 1.5     # [N·m] TODO(실측 필요) 목표 토크 — 그리퍼 최대(5N·m) 대비 자리표시자
 SMC_PHI       = 0.5     # [N·m] TODO(실측 필요) 경계층
-SMC_ALPHA_0   = 0.0     # 2026-09-17: 완전히 열린 상태에서 닫기 시작(0.5면 30mm에서 시작해 물체를 못 감쌈)
-SMC_K_A       = 0.01    # [α/스텝] TODO(실측 필요) — sim 값(0.001)은 N 단위 전제라 그대로 못 씀
+SMC_ALPHA_0   = 0.0     # 완전히 열린 상태에서 닫기 시작 — 0.5면 30mm에서 시작해 물체를 못 감싼다
+SMC_K_A       = 0.01    # [α/스텝] TODO(실측 필요) SMC 게인 — 그리퍼가 뻣뻣해 작게 잡아야 안정
 SMC_A_RATE    = 0.01
 SMC_A_MIN     = 0.30    # α 하한 — 개구부가 물체 크기 밑으로 안 벌어지게(물체 크기에 맞게 재조정 필요)
 SMC_A_MAX     = 1.00
@@ -87,7 +94,10 @@ class PiperGripperNode(Node):
 
     def _on_feedback(self, msg: Float32MultiArray):
         angle_mm, effort_nm, foc = msg.data
-        self.F_con = abs(float(effort_nm))  # 닫는 방향 저항은 음수로 들어옴(2026-09-17 실기 확인) — 크기만 사용
+        # ★ 닫는 방향 저항은 음수로 들어온다(여는 쪽이 양수). 부호를 안 지우면
+        # CONTACT_F_MIN 비교가 항상 실패해 "접촉 미감지"로 뜨면서 SMC가 계속 더
+        # 닫으라고만 명령해 펌웨어 토크 한계까지 밀어붙인다.
+        self.F_con = abs(float(effort_nm))
         self.foc_status = int(foc)
         self.stroke_mm = float(angle_mm)
         self.pub_grip_state.publish(Float32MultiArray(data=pack_grip_state(

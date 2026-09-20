@@ -37,7 +37,7 @@ APPROACH_DIST     = 0.05 # [m] 파지점 위 pre-grip 대기 높이 (launch: app
 GRASP_DEPTH_EXTRA = 0.010  # [m] 마커 평면보다 더 내려가는 깊이 (launch: grasp_depth_extra)
 
 # 최초 검출(detect) 타당성 게이트 — 기대 위치에서 너무 벗어난 검출은 오검출로 기각
-DETECT_MAX_ERR = 0.25  # [m] 2026-09-17: obj_expected_y_body 추정치가 부정확해서 완화
+DETECT_MAX_ERR = 0.25  # [m] obj_expected_*_body 추정 오차를 감안해 넉넉히 둔 값
 PRE_REDETECT     = True
 # 재검출 수용 한계를 축별로 나눈다 — 오검출이 통과했을 때의 결과가 축마다 다르기 때문.
 # XY로 틀리면 헛집고 재시도하면 그만이지만, z로 아래로 틀리면 손가락이 테이블을 찍는다.
@@ -51,10 +51,10 @@ EIH_Z_UP_MAX          = 0.03  # [m] anchor보다 "위로" 허용하는 한계(la
 #   넘게 낮으면 "떨어진 물체"로 보고 프레임 자체를 기각한다.
 
 # GRASP 하강 중 실시간 추종
-GRASP_CORR_ENABLED  = True   # 차체캠 델타보정 — 하강 중 AMR 드리프트를 따라감
+GRASP_CORR_ENABLED  = True   # 차체캠 델타보정 — 베이스가 움직이는 구성에서 그 드리프트를 따라감
 GRASP_CORR_JUMP_MAX = 0.08   # [m] 직전 대비 점프가 이보다 크면 기각(마커 면 전환 방어)
 GRASP_EIH_TRACK_ENABLED = True   # 손목캠 재검출 — 하강 중에도 윗면 마커를 다시 재서 파지점 갱신
-GRASP_Z_DROP_MAX        = 0.05   # [m] 최초 검출보다 이보다 더 낮은 z는 "벨트에서 떨어진 물체"로 기각
+GRASP_Z_DROP_MAX        = 0.05   # [m] 최초 검출보다 이보다 더 낮은 z는 "떨어진 물체"로 기각
 # 최초 검출(anchor)은 hover 높이의 원거리 관측이라 z가 높게 잡히기 쉽다 — 근접 재검출이
 # 그보다 낮다고 말하면 이 값까지는 따라 내려간다(0이면 예전처럼 anchor 아래로 안 감).
 GRASP_Z_BELOW_ANCHOR_MAX = 0.02  # [m] (launch: grasp_z_below_anchor_max)
@@ -77,8 +77,8 @@ PLACE_READY_STEPS = 150         # [스텝, 2.5s] 중립 자세 복귀 대기
 PLACE_LOWER_DIST = 0.02         # [m] place_lock 시점 팔 자세에서 그리퍼를 수직으로 내리는 거리
 
 # place 놓는점 계산 방식(place_point_mode)
-#   "shelf_geom"(sim 기본): 선반 상판 두께/보드 두께 등 sim 지오메트리로 계산(_place_point)
-#   "marker_inset"(실물):   마커 중심에서 "팔 베이스 쪽으로" PLACE_INSET_M만큼 당긴 지점에
+#   "shelf_geom":           선반 상판/보드 두께를 아는 경우 그 지오메트리로 계산
+#   "marker_inset"(기본):   마커 중심에서 PLACE_INSET_M만큼 비킨 지점에
 #                            놓는다. 물체를 마커 위에 그대로 올리면 (a)마커를 덮어버려
 #                            재검출이 끊기고 (b)쥔 물체가 마커 시야를 가린다. 마커 한 변
 #                            (34mm)만큼 당기면 마커 근접모서리 바로 바깥에 놓인다.
@@ -95,31 +95,30 @@ PLACE_RETREAT_DIST  = 0.05    # [m] 릴리즈 후 수직 후퇴 거리(초기자
 # ee_pose(실제 FK 위치)로 물리적 도달을 재확인한다(안 하면 하강 중 목표가 계속
 # 갱신될 때 "공중에서 헛집음"이 발생함— 실측 확인).
 PRE_ARRIVE_TOL = 0.010        # [m]
-# [스텝] 물리 도달 대기 상한. 5% 속도에서는 5초로 못 간다 — 2026-09-20 실기에서
-# pre/grasp 둘 다 이 상한을 넘겨 "그냥 진행"으로 빠졌고, 그게 덜 문 원인이었다.
-# (launch: arrive_max_wait)
+# [스텝] 물리 도달 대기 상한. 저속 설정에서는 5초로 부족하다 — 상한을 넘기면
+# "그냥 진행"으로 빠져 덜 문 채로 그리퍼가 닫힌다. (launch: arrive_max_wait)
 PRE_ARRIVE_MAX_WAIT = 300     # [스텝, 5s]
 # [m] 도달 판정 허용오차. 이 값은 "여기까지 왔으면 그리퍼를 닫는다"는 뜻이라 곧바로
-# 파지 깊이 오차가 된다 — 기본 4mm는 sim의 5cm 큐브(깊이 25mm) 기준이었고, 실물
-# 16.36mm 타겟(깊이 8mm)에는 너무 크다(최대 4mm 덜 내려간 채로 닫힐 수 있다).
+# 파지 깊이 오차가 된다. 물체가 작을수록 좁혀야 한다 — 파지 깊이가 8mm인데 허용치가
+# 4mm면 절반이 날아간다.
 GRASP_ARRIVE_TOL = 0.004      # [m] 3D 거리 허용오차 (launch: grasp_arrive_tol)
 # z는 따로, 더 좁게 본다 — XY는 몇 mm 어긋나도 손가락 사이에 들어오지만 z가 덜 내려가면
 # 물체 윗모서리만 물게 된다. (launch: grasp_arrive_z_tol)
 GRASP_ARRIVE_Z_TOL = 0.002    # [m]
 GRASP_ARRIVE_MAX_WAIT = 300   # [스텝, 5s] grasp 단계 물리 도달 대기 상한(위와 같은 파라미터)
 
-LIFT_HEIGHT = 0.10       # [m] 파지 후 들어올릴 높이 — plant_node의 실측 성공판정 임계값(5cm)보다 여유 있게
+LIFT_HEIGHT = 0.10       # [m] 파지 후 들어올릴 높이
 
 # ── 파지 성공/실패 판정 ─────────────────────────────────────────────────────
 # verify_mode 파라미터로 고른다.
-#   "gripper"(실물 v1 기본): 그리퍼 개구부(스트로크)+접촉으로 판정. 차체캠이 없어도 된다.
-#   "chassis"(sim 기본):     아래 차체캠 로직. 실물에 차체캠을 달면 그대로 되살아난다.
-#   "both":                  그리퍼가 판정하고 차체캠 결과는 로그로만 남긴다(교차검증).
+#   "gripper"(현재 기본): 그리퍼 개구부(스트로크)+접촉으로 판정. 카메라가 필요 없다.
+#   "chassis":            아래 차체캠 로직. 차체 카메라를 달면 그대로 되살아난다.
+#   "both":               그리퍼가 판정하고 차체캠 결과는 로그로만 남긴다(교차검증).
 #
-# [차체캠 방식 — 실물에선 비활성(차체캠 미장착)] 리프트 완료 후 VERIFY_WINDOW_N 동안
-# 지켜보며: 안 보임→성공(들려서 화각 이탈), 보임+낮은 높이→실패, 보임+높은 높이→성공.
-# ★ 실물에서 이 방식을 쓰면 안 되는 이유: 차체캠이 없으면 관측이 0건이라 "미검출=성공"
-#   분기로 무조건 빠진다(헛집어도 성공 보고). 차체캠을 달면 verify_mode=both로 먼저
+# [차체캠 방식] 리프트 완료 후 VERIFY_WINDOW_N 동안 지켜보며: 안 보임→성공(들려서
+# 화각 이탈), 보임+낮은 높이→실패, 보임+높은 높이→성공.
+# ★ 차체 카메라가 없는 구성에서 이 방식을 쓰면 안 된다. 관측이 0건이라 "미검출=성공"
+#   분기로 무조건 빠져서 헛집어도 성공으로 보고된다. 카메라를 달면 both로 먼저
 #   교차검증하고, 일치하면 chassis로 돌리거나 둘의 AND를 쓰면 된다.
 VERIFY_BASE_N     = 5     # 기준 높이를 만들 때 쓸 그립 직전 관측 수(중앙값 — 단발 튐 방어)
 VERIFY_WINDOW_N   = 90    # [스텝] 리프트 완료 후 관찰 시간(1.5초)
@@ -131,10 +130,10 @@ VERIFY_LOW_HITS   = 2     # 낮은 높이 관측이 이만큼 쌓이면 실패 �
 # (빈손이어도 손가락끼리 눌리면 접촉으로 잡힌다). 그래서 스트로크가 주 판정근거다.
 GRIP_VERIFY_WINDOW_N   = 60    # [스텝, 1s] 리프트 완료 후 그리퍼 상태 관찰 시간
 GRIP_VERIFY_MIN_SAMPLE = 10    # 이만큼은 받아야 판정한다(토픽 유실 방어)
-# ★ 보고되는 개구부는 "손가락 패드 사이 실제 간격"이 아니다. 실기 실측(2026-09-20):
-# 16.36mm 물체를 정상 파지했는데 25.9mm로 보고됐다 — 패드 두께 등으로 상수만큼 크게
-# 나온다(영점 미설정 영향도 있음). 이 오프셋을 빼지 않으면 판정선이 통째로 어긋난다.
-# 재기 방법: 아무것도 없이 그리퍼를 닫고 그때 보고되는 개구부가 곧 이 값이다.
+# ★ 보고되는 개구부는 "손가락 패드 사이 실제 간격"이 아니다. 패드 두께와 영점 설정
+# 때문에 상수만큼 크게 나온다 — 16.36mm 물체를 정상 파지했는데 25.9mm로 보고된 적이
+# 있다. 이 오프셋을 빼지 않으면 판정선이 통째로 어긋나 정상 파지를 실패로 읽는다.
+# 재는 법: 아무것도 없이 그리퍼를 닫고 그때 보고되는 개구부가 곧 이 값이다.
 GRIP_STROKE_OFFSET_MM  = 0.0   # [mm] 보고값 − 실제 간격 (launch: grip_stroke_offset_mm)
 GRIP_STROKE_MIN_RATIO  = 0.50  # 물체 폭 대비 이 비율 밑이면 "사이에 아무것도 없다"
 GRIP_STROKE_MARGIN_MM  = 10.0  # [mm] 물체 폭+이 값보다 넓으면 "물체를 안 물었다"(덜 닫힘)
@@ -156,11 +155,11 @@ class ArmNode(Node):
         self.step_ready = not self.step_confirm
         self._last_gated_phase = self.arm_phase
         self._gate_pub_phase = self.arm_phase  # 확인 대기 중 driver에 알릴 phase
-        # link6 원점 → 그리퍼 손가락 "끝" 거리. sim 기본값(0.135)은 손가락 장착점(joint7)이라
-        # 실물 손가락 길이가 빠져 있다 — 실물은 launch에서 실측값으로 덮어쓴다.
+        # EndPose 명령 기준점 → 그리퍼 손끝 거리. 물리적 손가락 길이가 아니라 펌웨어
+        # 기준점과 URDF link6의 불일치까지 합친 값이라, 실측으로 확정해 launch가 준다.
         self.ee_grip_offset = float(
             self.declare_parameter("ee_grip_offset", EE_GRIP_OFFSET).value)
-        # 파지 기하 3종 — 실기 실측으로 맞추는 값이라 런치 인자로 뺐다.
+        # 파지 기하 3종 — 물체가 바뀌면 다시 재는 값이라 런치 인자로 뺐다.
         self.approach_dist = float(
             self.declare_parameter("approach_dist", APPROACH_DIST).value)
         self.grasp_depth_extra = float(
@@ -306,18 +305,17 @@ class ArmNode(Node):
         self.verify_high_hits = 0    # 그중 "높은 위치"(=들려 있음) 관측 수
         self.verify_bz_last = None   # 마지막 관측 높이(로그용)
 
-        # place(픽 후 선반에 놓기) — use_marker_place=True(실물, AMR 없음)면 마커 기반
-        # place_ready~place_descend 경로를 쓰고, False(기본값, 기존 sim 경로)면 도킹
-        # 좌표만으로 수직 하강하는 place_lower 경로를 그대로 쓴다.
+        # place 경로 선택.
+        #   True (현재 기본): 마커 기반 정밀 배치 — place_ready → hover → detect → descend
+        #   False:            이미 도킹으로 거리가 맞춰진 전제로 수직 하강만 하는 place_lower
         self.use_marker_place = bool(
             self.declare_parameter("use_marker_place", False).value)
-        # sim은 body_link(AMR)가 world보다 이만큼 높아 Lula(world 기준 IK) 계산에 필요했지만,
-        # 실물은 body_link=world(팔 베이스)라 0으로 둬야 한다 — 실물 launch에서 0.0으로 오버라이드.
+        # body_link가 world보다 높은 구성(팔이 대차 위)에서 world 기준 IK를 풀 때 쓴다.
+        # 팔이 고정 베이스에 직접 설치되면 body_link=world라 0이며, launch가 그렇게 준다.
         self.body_link_world_z = float(
             self.declare_parameter("body_link_world_z", BODY_LINK_WORLD_Z).value)
-        # hover가 처음 향하는 "물체 대략 위치" 추정값 — sim은 OBJ_CENTER_BODY(월드 절대높이
-        # 기반)를 그대로 쓰지만, 실물은 body_link=world라 body_link 기준 실측값을 직접 넣어야
-        # 한다(예: 물체 높이-팔 베이스 높이). 기본값은 sim과 수치가 같도록 역산해둠.
+        # hover가 처음 향하는 "물체 대략 위치". 마커를 화각에 넣는 것이 목적이라 정밀할
+        # 필요는 없다 — 팔 베이스 기준 실측값을 launch로 준다(예: 물체높이 − 베이스높이).
         self.obj_expected_x_body = float(
             self.declare_parameter("obj_expected_x_body", OBJ_CENTER_BODY[0]).value)
         self.obj_expected_y_body = float(
@@ -355,9 +353,8 @@ class ArmNode(Node):
             float(self.declare_parameter("place_expected_y_body", PLACE_CENTER_BODY_GUESS[1]).value),
             float(self.declare_parameter("place_expected_z_body", PLACE_CENTER_BODY_GUESS[2]).value),
         ], float) if self.use_marker_place else np.zeros(3)
-        # place_dock(AMR)이 없는 실물 경로에서는 위 자리표시자가 유일한 기준점이라
-        # amr_node가 있던 sim과 달리 아무도 갱신해주지 않는다 — 마커 재검출
-        # (place_detect/place_descend)이 이 추정치를 실제 위치로 보정한다.
+        # 도킹 단계가 없으므로 위 추정치를 갱신해 줄 주체가 없다 — place_detect의
+        # 마커 재검출이 이 값을 실제 위치로 보정한다.
         self.place_wait_n = 0        # place_descend의 물리도달 대기 카운터(grasp_wait_n과 동일 용도)
         self.place_top_new = None    # 손목캠이 본 place 마커 최신 관측(body_link 상대)
         self.ml_place_anchor = None  # place_detect 최초 검출 놓는점(z-drop/점프 판정 기준)
@@ -405,7 +402,7 @@ class ArmNode(Node):
         self.ml_target = self._obj_center_body_rel() - HOVER_APPROACH_DIR * (HOVER_STANDOFF + self.ee_grip_offset)
 
     def _obj_center_body_rel(self):
-        """물체 대략 위치(body_link 기준) — obj_expected_*_body 파라미터로 실물/sim 각각 설정."""
+        """물체 대략 위치(body_link 기준) — obj_expected_*_body 파라미터로 설정."""
         return np.array([self.obj_expected_x_body, self.obj_expected_y_body,
                           self.obj_expected_z_body])
 
@@ -467,7 +464,7 @@ class ArmNode(Node):
         try:
             idx = [msg.name.index(n) for n in PIPER_JOINT_NAMES]
         except ValueError:
-            return  # 팔 관절이 아닌 joint_states(sim 등) — 무시
+            return  # 팔 관절이 아닌 joint_states — 무시
         self.joint_now = np.array([msg.position[i] for i in idx], float)
 
     def _joint_err_deg(self, q_target):
@@ -583,9 +580,9 @@ class ArmNode(Node):
         return self.ml_place_center - self.place_approach_dir * self.ee_grip_offset
 
     def _place_point_shelf_geom(self, mk):
-        """[sim] 상판 마커(ID6) 위치(mk, 몸체좌표) → link6 IK 목표(놓는점). _grasp_point()와
+        """상판 마커 위치(mk, 몸체좌표) → link6 IK 목표(놓는점). _grasp_point()와
         같은 부호규약(place_approach_dir, world 기준) — 마커는 상판 표면 바로 위에
-        보드/셀 두께만큼 떠서 붙어 있다(plant_node.build_place_shelf 참고). 물체를
+        보드/셀 두께만큼 떠서 붙어 있다는 전제다. 물체를
         그 표면에 내려놓으려면 중심이 표면보다 OBJ_S/2 위여야 하고, IK 목표(link6)는
         거기서 그리퍼 길이(self.ee_grip_offset)만큼 더 위다 — 세 오프셋을 하나로 묶는다."""
         mk_w = mk + np.array([0.0, 0.0, self.body_link_world_z])
@@ -595,9 +592,9 @@ class ArmNode(Node):
 
     def _verify_by_chassis_cam(self):
         """차체 카메라 관측만으로 파지 성공 여부를 판정한다(None=판정 보류).
-        ★ verify_mode="chassis"/"both"일 때만 호출된다. 실물 v1은 차체캠이 없어서
+        ★ verify_mode="chassis"/"both"일 때만 호출된다. 차체 카메라가 없는 구성에서는
         관측이 0건 → "미검출=성공"으로 빠지므로 쓰면 안 된다(그래서 기본이 gripper).
-        차체캠을 달면 verify_mode=both로 이 함수를 그대로 되살려 교차검증할 것."""
+        카메라를 달면 verify_mode=both로 이 함수를 그대로 되살려 교차검증할 것."""
         base = self.verify_bz0 if self.verify_bz0 is not None else OBJ_CENTER_BODY[2] - self.body_link_world_z
         basis = "그립 전 기준" if self.verify_bz0 is not None else "기본높이(기준선 없음)"
 
@@ -627,7 +624,7 @@ class ArmNode(Node):
     def _wait_physical_arrive(self, wait_attr, tol, label):
         """_move_l의 시간상 done 이후 실제(ee_pose) 도달을 기다린다. True면 진행해도 됨.
         5% 속도에서는 스트림이 끝난 뒤에도 팔이 한참 더 가므로 이 확인이 없으면
-        다음 단계가 "아직 안 간 상태"에서 시작한다(2026-09-20 실기에서 확인)."""
+        다음 단계가 "아직 안 간 상태"에서 시작한다."""
         err = ((self.ee_pose - self.ml_target)
                if self.ee_pose is not None else np.zeros(3))
         dist = float(np.linalg.norm(err))
@@ -711,9 +708,8 @@ class ArmNode(Node):
 
     def _on_pick_verdict(self, ok: bool):
         """판정 결과 처리 — 성공이면 종료, 실패면 재시도 또는 포기."""
-        # plant가 채점(실측 대조)할 수 있도록 이번 시도 결과를 알린다.
-        # 이 토픽은 "제어 신호"가 아니라 "카메라 판정 보고" — plant가 자기 god's-eye
-        # 실측과 대조해 판정 정확도를 기록하는 용도.
+        # 이번 시도 결과를 알린다. "제어 신호"가 아니라 "판정 보고"이며, 참값을 아는
+        # 관측자가 있으면 판정 정확도를 채점하는 데 쓸 수 있다.
         self.pub_pick_event.publish(Bool(data=bool(ok)))
         if ok:
             print(f"  [팔] ✓ 파지 검증 성공 — place 대기로 전환")
@@ -825,7 +821,7 @@ class ArmNode(Node):
                 self.gr_eih_tail.pop(0)
 
             # PRE와 동일한 재검출 로직을 grasp 하강 중에도 적용 — 점프 판정은 최초 detect
-            # 파지점(ml_grasp_anchor) 대비 누적 드리프트로 clamp. 물체가 벨트에서 떨어지면
+            # 파지점(ml_grasp_anchor) 대비 누적 드리프트로 clamp. 물체가 아래로 떨어지면
             # z가 크게 낮아지는데, 이를 그대로 쫓으면 바닥을 뚫고 내려가므로 GRASP_Z_DROP_MAX
             # 이상 낮은 z는 "떨어진 물체"로 기각한다.
             if self.grasp_eih_track and hit:
@@ -835,7 +831,7 @@ class ArmNode(Node):
                 if not ok and self.gr_eih_rej_n % 30 == 0:
                     print(f"    [GRASP 재검출 기각] {why} (anchor 대비) — 무시")
                 if ok:
-                    # z clamp: anchor보다 아래로는 안 내려간다(벨트 충돌 방지, PRE와 동일 논리)
+                    # z clamp: anchor보다 아래로는 안 내려간다(바닥 충돌 방지, PRE와 동일 논리)
                     z_lo = self.ml_grasp_anchor[2] - self.grasp_z_below_anchor_max
                     if g2[2] < z_lo:
                         self.gr_z_clamp_n += 1
@@ -902,7 +898,7 @@ class ArmNode(Node):
             if done:
                 # hover에도 물리 도달 확인이 필요하다 — 여기서 뒤처진 채로 detect에
                 # 들어가면 pre/grasp가 통째로 밀려서 결국 덜 문 채로 닫힌다
-                # (2026-09-20 실기: grasp 진입 시점에 이미 134mm 뒤처져 있었음).
+                # (확인 사례: grasp 진입 시점에 이미 134mm 뒤처져 있었다).
                 err_h = ((self.ee_pose - self.ml_target)
                          if self.ee_pose is not None else np.zeros(3))
                 dist_h = float(np.linalg.norm(err_h))
@@ -934,7 +930,7 @@ class ArmNode(Node):
                       f"기각={self.pre_rej_n}회 미검출={self.pre_miss_n}/{self.pre_try_n}")
             done = self._move_l(EE_SPEED_PRE)
             if done:
-                # 시간 기준 done만으론 물리 도달을 보장 못 해 실제 ee_pose로 재확인(2026-09-03).
+                # 시간 기준 done만으론 물리 도달을 보장 못 해 실제 ee_pose로 재확인한다.
                 err_p = ((self.ee_pose - self.ml_target)
                          if self.ee_pose is not None else np.zeros(3))
                 dist_p = float(np.linalg.norm(err_p))
@@ -1100,9 +1096,8 @@ class ArmNode(Node):
                 # 바닥에 닿아 있을 수 있다 — 판정 전에 물리 도달을 확인한다.
                 if not self._wait_physical_arrive("lift_wait_n", PRE_ARRIVE_TOL, "lift"):
                     return
-                #   차체캠으로 직접 판정한다(시뮬 전용 god's-eye
-                #   좌표를 안 쓴다 — 실물 이식을 위해). 판정 근거는 리프트가
-                #   올라가는 동안 이미 모아둔 관측(lift_bz_max)이다.
+                # 판정은 verify 단계에서 한다. 차체캠 방식의 근거는 리프트가 올라가는
+                # 동안 이미 모아둔 관측(lift_bz_max)이다.
                 self.arm_phase = "verify"; self.arm_step = 0
 
         elif ap == "verify":
@@ -1111,7 +1106,7 @@ class ArmNode(Node):
                 self._on_pick_verdict(verdict)
 
         elif ap == "place_wait":
-            if self.arm_step > 5400:  # 90초 안전판(place_clear+turn+dock 정상 완주 ~30초보다 여유) — place_lock이 끝내 안 오면 포기
+            if self.arm_step > 5400:  # 90초 안전판 — place_lock이 끝내 안 오면 포기
                 print("  ★ 팔: place_lock 대기 타임아웃 — 포기")
                 self.arm_phase = "place_done"; self.arm_step = 0
             # 실제 전이는 _on_place_lock 콜백에서 처리 (수신 즉시 반응)
@@ -1132,8 +1127,8 @@ class ArmNode(Node):
         # ─────────────────────────────────────────────────────────────────
         elif ap == "place_ready":
             # 물체를 쥔 채 중립(SEARCH_Q)으로 복귀 — 그리퍼 명령은 안 건드리므로
-            # 물체는 계속 잡고 있다. AMR이 90도 돌고 크랩하는 동안 리프트 자세로
-            # 버티는 것보다 이쪽이 관성·간섭 면에서도 낫다.
+            # 물체는 계속 잡고 있다. 리프트 자세 그대로 place 위치로 가는 것보다
+            # 관성·간섭 면에서 낫다.
             self.pub_joint_hold.publish(Float32MultiArray(
                 data=pack_joint_hold_target(SEARCH_Q)))
             if self._joint_settled("place_ready", SEARCH_Q, self.place_ready_steps):
@@ -1265,7 +1260,7 @@ class ArmNode(Node):
             done = self._move_l(EE_SPEED_LIFT)
             if done:
                 # 여기서 안 기다리면 실제로 10mm쯤만 뜬 채 place_home(관절 복귀)이
-                # 시작돼 손가락이 방금 놓은 물체를 스친다(2026-09-20 실기에서 확인).
+                # 시작돼 손가락이 방금 놓은 물체를 스친다.
                 if not self._wait_physical_arrive("retreat_wait_n", PRE_ARRIVE_TOL,
                                                    "place_retreat"):
                     return

@@ -53,14 +53,14 @@ def generate_launch_description():
         DeclareLaunchArgument("cam_tcp_offset_z", default_value="0.026"),
         DeclareLaunchArgument("cam_tcp_offset_pitch_deg", default_value="27.5"),
         DeclareLaunchArgument("cam_tcp_offset_roll_deg", default_value="-90.0"),
-        # hover가 처음 향할 "물체 대략 위치"(body_link=팔 베이스 기준) — 실측해서 바꿀 것.
-        # z 기본값은 2026-09-17 실측(팔 베이스 지면 38cm, 물체 지면 25cm → -0.13m).
+        # hover가 처음 향할 "물체 대략 위치"(팔 베이스 기준) — 마커를 화각에 넣는 것이
+        # 목적이라 정밀할 필요는 없다. z는 (물체 높이 − 팔 베이스 높이)로 잡는다.
         DeclareLaunchArgument("obj_expected_x_body", default_value="0.0"),
-        DeclareLaunchArgument("obj_expected_y_body", default_value="0.40"),  # 2026-09-17 실측
+        DeclareLaunchArgument("obj_expected_y_body", default_value="0.40"),
         DeclareLaunchArgument("obj_expected_z_body", default_value="-0.13"),
         # "EndPoseCtrl 명령 기준점 → 손끝" 거리. 물리적 손가락 길이가 아니라 펌웨어 EndPose
         # 기준점과 URDF link6 원점의 불일치까지 합친 값이라, joint7 장착점(135.8mm)보다
-        # 짧은 게 정상이다. 2026-09-18 실기 확정 — 물체 높이를 바꿔가며 상수임을 확인.
+        # 짧은 게 정상이다. 물체 높이를 바꿔가며 재도 같은 값이 나오는 상수다.
         DeclareLaunchArgument("ee_grip_offset", default_value="0.121"),
         # 파지 깊이/접근 기하 — 물체가 안 잡히면 여기부터 만진다(arm_node.py 상수와 같은 기본값).
         DeclareLaunchArgument("approach_dist", default_value="0.05"),        # [m] pre 대기 높이
@@ -95,19 +95,19 @@ def generate_launch_description():
         # set_arm_joint.py로 그 자세를 먼저 확인하고 넣을 것.
         DeclareLaunchArgument("place_home_q_deg", default_value="[0.0, 45.0, -90.0, 0.0, 45.0, 0.0]"),
         # place_home(SEARCH_Q) 도달 확인 뒤 마지막으로 갈 자세[deg].
-        # 2026-09-20 read_arm_joint.py로 손으로 잡아 실측한 값.
+        # read_arm_joint.py로 팔을 손으로 잡아 실측한 값.
         DeclareLaunchArgument("place_done_q_deg",
                               default_value="[0.0, -1.5, -5.0, -8.0, 28.5, 5.0]"),
         # SEARCH_Q에서 관절 80° 이상 이동하는 자세라 5% 속도에선 place_home보다 오래 걸린다.
         DeclareLaunchArgument("place_done_settle_steps", default_value="1200"),
-        # 파지 판정 — 실기엔 차체캠이 없어 chassis 모드는 "미검출=성공"으로 빠진다.
-        # 차체캠을 달면 both로 바꿔 두 판정을 교차검증할 것.
+        # 파지 판정 — 차체 카메라가 없으면 chassis 모드는 "미검출=성공"으로 빠진다.
+        # 카메라를 달면 both로 바꿔 두 판정을 교차검증할 것.
         DeclareLaunchArgument("verify_mode", default_value="gripper"),
         # 타겟 치수 — 폭은 그리퍼 개구부 판정, 높이는 place 릴리즈 높이 계산에 쓴다.
         DeclareLaunchArgument("obj_width_m", default_value="0.01636"),
         DeclareLaunchArgument("obj_height_m", default_value="0.01636"),
-        # 보고되는 개구부는 실제 간격보다 상수만큼 크다(패드 두께/영점 미설정).
-        # 2026-09-20 실측: 16.36mm 물체 정상 파지 시 25.9mm 보고 → 오프셋 9.5mm.
+        # 보고되는 개구부는 실제 간격보다 상수만큼 크다(패드 두께 + 영점 미설정).
+        # 16.36mm 물체를 정상 파지했을 때 25.9mm로 보고된 데서 역산한 값이다.
         # TODO(재확인): 아무것도 없이 그리퍼를 닫고 보고되는 값으로 다시 맞출 것.
         DeclareLaunchArgument("grip_stroke_offset_mm", default_value="9.5"),
         # place — 마커 중심에서 팔 베이스 쪽으로 한 변(34mm) 당긴 곳에 놓는다(마커를
@@ -119,7 +119,7 @@ def generate_launch_description():
         DeclareLaunchArgument("place_inset_mode", default_value="marker_y"),
         DeclareLaunchArgument("place_release_gap", default_value="0.005"),
         DeclareLaunchArgument("place_freeze_after_detect", default_value="true"),
-        # sim의 30°는 sim 선반 높이 전용 — 실물은 픽과 같은 수직 접근이 기본.
+        # 선반이 높으면 기울여야 IK가 풀리지만, 현재 배치는 픽과 같은 수직 접근이 기본.
         DeclareLaunchArgument("place_pitch_deg", default_value="0.0"),
         # place 마커가 대략 있을 body_link 위치. 선반이 픽 타겟과 같은 선반이라
         # 기본값은 픽 hover 위치(obj_expected_*)를 그대로 물려받는다 — 어차피 여기로

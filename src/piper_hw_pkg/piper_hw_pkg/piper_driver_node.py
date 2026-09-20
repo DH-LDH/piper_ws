@@ -34,14 +34,14 @@ CAN_NAME_DEFAULT = "can_piper"  # udev 규칙으로 고정한 이름(USB-CAN 동
 REALLY_ENABLE_DEFAULT = False   # True로 명시해야 EnableArm/모션 명령을 실제로 보낸다(첫 기동 안전장치)
 ENABLE_ARM_MOTION_DEFAULT = True  # False면 really_enable=true여도 JointCtrl/EndPoseCtrl은 안 보냄(그리퍼만 테스트할 때 씀)
 MOVE_SPD_RATE_DEFAULT = 5       # [%] 실기 검증 중 확정 — 필요시 파라미터로 올릴 것
-TICK_HZ = 60.0                  # arm_node.py/gripper 쪽 스텝 기반 상수(15초=900스텝 등)를 그대로 쓰기 위해 sim과 동일 rate 유지
+TICK_HZ = 60.0                  # 상태기계·그리퍼의 시간 상수가 전부 스텝 수라(900스텝=15초) 이 값이 곧 시간 기준
 
-# plant_node.py:108의 로컬 상수 — Lula가 아니라 실물 펌웨어가 IK를 풀지만, "어느 롤로
-# 접근할지"는 파지 기하 자체의 문제라 실물에서도 동일해야 한다.
+# 파지 시 그리퍼를 어느 롤로 들이댈지. IK를 푸는 주체(펌웨어)와 무관하게 파지 기하
+# 자체가 정하는 값이다.
 GRASP_ROLL_DEG = -90.0
 
-# arm_node.py가 이 phase 문자열일 때 관절유지(JointCtrl, SEARCH_Q)를 쓴다 — 나머지는 전부
-# /arm/cartesian_target을 EndPoseCtrl로 스트리밍(plant_node.py:1671/1709 화이트리스트와 동일).
+# arm_node가 이 phase일 때는 관절 직접 지령(JointCtrl, MOVE J)을 쓴다.
+# 나머지 phase는 /arm/cartesian_target을 EndPoseCtrl(MOVE L)로 스트리밍한다.
 # place_done도 관절유지 — arm_node가 "최종 자세"를 여기서 지령한다(예전엔 아무 명령도
 # 안 보내서 place_home의 마지막 명령을 그대로 물려받기만 했다).
 JOINT_HOLD_PHASES = ("wait", "place_ready", "place_home", "place_done")
@@ -61,8 +61,8 @@ FAULT_CODES = {1, 2, 3, 4, 7}
 
 
 def _body_to_native_xy(x_body, y_body):
-    """arm_node가 body_link 관례(sim의 ARM_BASE_YAW_DEG)로 계산한 XY를 EndPoseCtrl
-    고유좌표(native)로 변환 — 2026-09-17 HOVER_Q_VERIFIED 실측으로 회전각 확인."""
+    """arm_node가 body_link 기준으로 계산한 XY를 EndPoseCtrl 고유좌표로 변환.
+    팔이 베이스 기준 ARM_BASE_YAW_DEG만큼 돌아 장착돼 있어 이 회전이 필요하다."""
     a = math.radians(-ARM_BASE_YAW_DEG)
     return (x_body * math.cos(a) - y_body * math.sin(a),
             x_body * math.sin(a) + y_body * math.cos(a))
@@ -76,7 +76,8 @@ def _native_to_body_xy(x_native, y_native):
 
 
 def _build_down_quats(place_pitch_deg=PLACE_PITCH_DEG):
-    """DOWN_QUAT/HOVER_DOWN_QUAT/PLACE_DOWN_QUAT — plant_node.py:1173-1208과 동일 식."""
+    """grasp / hover / place 각 단계의 그리퍼 지향 쿼터니언을 만든다.
+    셋 다 "아래를 본다"가 기본이고 단계별 pitch와 공통 롤만 다르다."""
     def _one(pitch_deg):
         q = quat_from_two_vec(TOOL_AXIS_LOCAL, GRIPPER_DOWN)
         if abs(pitch_deg) > 1e-6:
@@ -91,7 +92,7 @@ def _build_down_quats(place_pitch_deg=PLACE_PITCH_DEG):
 
 def _quat_to_rpy_deg(q):
     """쿼터니언(w,x,y,z) → (roll,pitch,yaw)[deg], R=Rz(yaw)@Ry(pitch)@Rx(roll) 가정.
-    2026-09-17 실기 EndPoseCtrl 테스트로 검증 완료(180도 대칭 이중해로 일치 확인)."""
+    해가 180도 대칭으로 둘 나오지만 같은 자세를 가리키므로 어느 쪽이든 무방하다."""
     R = _quat_to_R(q)
     pitch = -math.asin(np.clip(R[2, 0], -1.0, 1.0))
     roll = math.atan2(R[2, 1], R[2, 2])
@@ -126,10 +127,9 @@ class PiperDriverNode(Node):
         self.joint_hold_target = np.array(SEARCH_Q, float)
         self.cartesian_target = None
         self._last_move_mode = None  # ModeCtrl 중복호출 방지(CAN 트래픽 절약)
-        # ★ 같은 목표를 60Hz로 재전송하면 펌웨어가 매 틱 MOVE L을 새로 시작한다 —
-        # 5% 속도에서는 가속 램프가 매번 리셋돼 팔이 사실상 안 움직인다(2026-09-20 실기:
-        # grasp 28초 동안 5mm 이동 → 명령이 끊긴 grip 단계에서 8초에 133mm 이동).
-        # 그래서 값이 "바뀐 경우에만" 보낸다. 유지는 펌웨어가 알아서 한다.
+        # ★ 같은 목표를 60Hz로 재전송하면 펌웨어가 매 틱 MOVE L 궤적을 새로 시작해
+        # 가속 램프가 리셋된다. 저속 설정에서는 램프 구간만 반복하다 팔이 사실상
+        # 전진하지 못한다. 그래서 값이 "바뀐 경우에만" 보낸다 — 유지는 펌웨어 몫이다.
         self._last_endpose = None
         self._last_jointctrl = None
         self._cmd_sent = 0; self._cmd_skipped = 0
@@ -178,9 +178,9 @@ class PiperDriverNode(Node):
         phase = (msg.data.split(" ")[0].split("=")[-1]
                   if "phase=" in msg.data else msg.data)
         if phase != self.arm_phase:
-            # 단계가 바뀌면 중복생략 캐시를 비운다 — 값이 직전 단계와 같아도(예: 기동
-            # 시 'wait'의 SEARCH_Q와 'place_home'의 SEARCH_Q) 한 번은 다시 보내야 한다.
-            # 안 그러면 그 단계의 명령이 통째로 안 나간다(2026-09-20 실기에서 확인).
+            # 단계가 바뀌면 중복생략 캐시를 비운다. 값이 직전 단계와 같아도(예: 기동
+            # 시 'wait'의 SEARCH_Q와 'place_home'의 SEARCH_Q) 한 번은 다시 보내야
+            # 한다 — 안 그러면 그 단계의 명령이 통째로 안 나가고 팔이 제자리에 선다.
             self._last_endpose = None
             self._last_jointctrl = None
         self.arm_phase = phase
@@ -230,7 +230,7 @@ class PiperDriverNode(Node):
         elif self.arm_phase in CARTESIAN_PHASES and self.cartesian_target is not None:
             self._send_move_mode(0x02)  # MOVE L
             rx, ry, rz_body = self._rpy_by_phase[self.arm_phase]
-            rz = rz_body - ARM_BASE_YAW_DEG  # 2026-09-17: yaw도 XY랑 같은 회전보정 필요(실측 확인)
+            rz = rz_body - ARM_BASE_YAW_DEG  # yaw도 XY와 같은 회전보정을 받아야 한다
             x_body, y_body, z = self.cartesian_target
             x, y = _body_to_native_xy(x_body, y_body)
             cmd = (round(x * 1_000_000), round(y * 1_000_000), round(z * 1_000_000),

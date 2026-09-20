@@ -26,8 +26,14 @@ from step22_common import (
     _wrap, _quat_to_R, _plate_basis, compute_marker_faces, pack_chassis_pose, pack_eih_marker,
 )
 
-#   차체 카메라 → 물체 옆면 마커(ID0~3) → /vision/chassis_pose (bx,by,phi)
-#   손목 카메라 → 물체 윗면 마커(ID4)   → /vision/eih_marker_body (x,y,z)
+# ArUco 마커 검출 노드. 카메라 두 계통을 한 파일에서 처리한다.
+#
+#   손목 카메라(eih) → 픽/플레이스 마커 → /vision/eih_marker_body, /vision/place_marker_body
+#   차체 카메라      → 물체 옆면·선반 전면 마커 → /vision/chassis_pose, /vision/place_pose
+#
+# ★ 현재 실기 구성에는 차체 카메라가 없다. 차체캠 경로(_on_chassis_image 등)는
+#   카메라를 장착했을 때 바로 되살려 손목캠 판정과 교차검증하려고 남겨둔 것이며,
+#   camera_info가 안 들어와 콜백 첫 줄에서 반환되므로 실행되지 않는다.
 # ── 사용자 조정 파라미터 ─────────────────────────────────────────────────────
 
 # 마커 포즈 채택 기준 (둘 중 하나라도 못 넘기면 그 프레임은 "미검출"로 버린다)
@@ -113,7 +119,7 @@ class VisionNode(Node):
         self.det = _make_detector(self.declare_parameter("corner_refine", CORNER_REFINE).value)
         self.clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         self.faces = compute_marker_faces()
-        # place 선반 전면 마커(ID5/ID7) — plant_node.py의 build_place_shelf()와 같은 오프셋을 써야 함
+        # place 선반 전면 마커(ID5/ID7) — 선반 지오메트리와 같은 오프셋을 써야 함
         _n_front = np.array([0., -1., 0.])
         _basis = _plate_basis(_n_front)
         # 원거리용(ID5, 큰 마커)과 근접용(ID7, 작은 마커) — 둘 다 선반 앞면(-Y)에 있고
@@ -149,9 +155,9 @@ class VisionNode(Node):
             self.declare_parameter("eih_reproj_max_px", EIH_REPROJ_MAX_PX).value)
         self.eih_reproj_max_rel = float(
             self.declare_parameter("eih_reproj_max_rel", EIH_REPROJ_MAX_REL).value)
-        # sim의 eih_cam(USD 카메라)은 OpenCV(x-right,y-down,z-fwd)와 y/z 부호가 반대라
-        # solvePnP 결과에 diag(1,-1,-1)이 필요했음 — 실물 eih_cam(link6 기준 직접 정의,
-        # OpenCV 관례)은 이 반전이 필요 없어서 파라미터로 껐다 켰다 가능하게 함.
+        # 카메라 프레임 규약이 OpenCV(x-right, y-down, z-fwd)와 다르면 solvePnP 결과에
+        # 축 부호 반전이 필요하다. 실물 eih_cam은 link6 기준으로 OpenCV 관례에 맞춰
+        # 정의해서 반전이 필요 없다 — 파라미터로 껐다 켤 수 있게 남겨둔다.
         self.eih_axis_flip = bool(self.declare_parameter("eih_axis_flip", True).value)
         self.eih_y_sign = -1.0 if bool(self.declare_parameter("eih_y_flip", False).value) else 1.0
         _base = np.diag([1.0, -1.0, -1.0]) if self.eih_axis_flip else np.eye(3)
@@ -232,9 +238,12 @@ class VisionNode(Node):
         return bx, by, bz, phi, up_z, rep_err
 
     # ── 차체 카메라: 옆면 마커(ID 0~3) → (bx,by,phi) ────────────────────────
+    # [현재 미사용 — 차체 카메라 미장착] camera_info가 안 들어와 아래 콜백은 첫 줄에서
+    # 반환된다. 카메라를 달면 그대로 동작하며, arm_node의 verify_mode=both로 손목캠
+    # 기반 파지 판정과 교차검증할 수 있다.
     def _on_chassis_image(self, msg: Image):
         if self.K is None: return
-        # frame_id는 "chassis_cam:<plant 물리스텝>" — pack_chassis_pose의 sim_step으로 그대로 실어보냄
+        # frame_id에 "chassis_cam:<스텝번호>"가 실려 오면 그대로 페이로드에 옮긴다
         sim_step = 0
         if ":" in msg.header.frame_id:
             try: sim_step = int(msg.header.frame_id.split(":")[1])

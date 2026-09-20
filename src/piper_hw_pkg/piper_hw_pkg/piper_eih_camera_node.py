@@ -31,8 +31,9 @@ PUBLISH_HZ = 15.0
 CAM_TCP_OFFSET_X_DEFAULT = -0.085          # [m] 상하
 CAM_TCP_OFFSET_Y_DEFAULT = -0.01           # [m] 좌우
 CAM_TCP_OFFSET_Z_DEFAULT = 0.026           # [m] 앞뒤
-# 2026-09-18 eih_cam_calib.py로 확정(9자세, 자세간 편차 10.4mm→3.8mm). 전자각도계로 쟀던
-# 40.0은 12.5도 틀렸고, 그 오차가 거리에 비례하는 지향 오차로 나타나 파지가 계속 빗나갔다.
+# ★ pitch는 각도계로 재면 안 된다. 카메라 하우징 기준면과 센서 광축이 일치한다는
+# 보장이 없어 12.5° 틀린 적이 있다. 각도 오차는 거리에 비례하는 지향 오차로 나타나서
+# 팔이 다가갈수록 추정 위치가 움직인다 — eih_cam_calib.py로 산출한 값을 쓸 것.
 CAM_TCP_OFFSET_PITCH_DEG_DEFAULT = 27.5    # [deg] 틸트(link6 y축 회전)
 CAM_TCP_OFFSET_ROLL_DEG_DEFAULT = -90.0    # [deg] 광축 롤 — 카메라 이미지 좌우를 로봇 좌우에 맞춤
 
