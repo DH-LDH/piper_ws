@@ -317,13 +317,17 @@ def unpack_chassis_pose(data):
     return (float(bx), float(by), float(phi), bool(valid), int(marker_id),
             int(sim_step), float(bz))
 
-def pack_eih_marker(x, y, z, valid):
-    """vision → arm. [x,y,z,valid]"""
-    return [float(x), float(y), float(z), 1.0 if valid else 0.0]
+def pack_eih_marker(x, y, z, valid, yaw=0.0):
+    """vision → arm. [x,y,z,valid,yaw]
+    yaw: 마커 자신의 +Y축을 body XY 평면에 투영한 방향[rad]. place에서 "마커 기준
+    어느 쪽으로 비켜 놓을지"를 정할 때 쓴다(위치만으로는 마커의 방향을 알 수 없다)."""
+    return [float(x), float(y), float(z), 1.0 if valid else 0.0, float(yaw)]
 
 def unpack_eih_marker(data):
-    x, y, z, valid = data
-    return float(x), float(y), float(z), bool(valid)
+    # yaw는 나중에 추가된 필드 — 옛 4개짜리 메시지도 그대로 받는다.
+    x, y, z, valid = data[0], data[1], data[2], data[3]
+    yaw = float(data[4]) if len(data) > 4 else 0.0
+    return float(x), float(y), float(z), bool(valid), yaw
 
 def pack_grip_state(stroke_mm, effort, contact, holding, active):
     """gripper → arm. [stroke_mm, effort, contact, holding, active]

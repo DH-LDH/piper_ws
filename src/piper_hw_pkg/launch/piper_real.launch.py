@@ -82,10 +82,17 @@ def generate_launch_description():
         # 타겟 치수 — 폭은 그리퍼 개구부 판정, 높이는 place 릴리즈 높이 계산에 쓴다.
         DeclareLaunchArgument("obj_width_m", default_value="0.01636"),
         DeclareLaunchArgument("obj_height_m", default_value="0.01636"),
+        # 보고되는 개구부는 실제 간격보다 상수만큼 크다(패드 두께/영점 미설정).
+        # 2026-09-20 실측: 16.36mm 물체 정상 파지 시 25.9mm 보고 → 오프셋 9.5mm.
+        # TODO(재확인): 아무것도 없이 그리퍼를 닫고 보고되는 값으로 다시 맞출 것.
+        DeclareLaunchArgument("grip_stroke_offset_mm", default_value="9.5"),
         # place — 마커 중심에서 팔 베이스 쪽으로 한 변(34mm) 당긴 곳에 놓는다(마커를
         # 덮지 않게). 릴리즈는 물체 바닥이 선반면에서 5mm 뜬 높이에서.
         DeclareLaunchArgument("place_point_mode", default_value="marker_inset"),
-        DeclareLaunchArgument("place_inset_m", default_value="0.034"),
+        DeclareLaunchArgument("place_inset_m", default_value="0.035"),
+        # 당기는 방향: marker_y=마커 자신의 -Y(마커를 비스듬히 붙여도 따라감),
+        # body_y=팔 베이스 정면(-Y) 고정, radial=원점→마커 반대방향(종전).
+        DeclareLaunchArgument("place_inset_mode", default_value="marker_y"),
         DeclareLaunchArgument("place_release_gap", default_value="0.005"),
         DeclareLaunchArgument("place_freeze_after_detect", default_value="true"),
         # sim의 30°는 sim 선반 높이 전용 — 실물은 픽과 같은 수직 접근이 기본.
@@ -168,8 +175,10 @@ def generate_launch_description():
                           "verify_mode": LaunchConfiguration("verify_mode"),
                           "obj_width_m": LaunchConfiguration("obj_width_m"),
                           "obj_height_m": LaunchConfiguration("obj_height_m"),
+                          "grip_stroke_offset_mm": LaunchConfiguration("grip_stroke_offset_mm"),
                           "place_point_mode": LaunchConfiguration("place_point_mode"),
                           "place_inset_m": LaunchConfiguration("place_inset_m"),
+                          "place_inset_mode": LaunchConfiguration("place_inset_mode"),
                           "place_release_gap": LaunchConfiguration("place_release_gap"),
                           "place_freeze_after_detect": LaunchConfiguration("place_freeze_after_detect"),
                           "place_pitch_deg": LaunchConfiguration("place_pitch_deg"),

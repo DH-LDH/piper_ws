@@ -487,7 +487,10 @@ def main():
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # launch가 SIGINT를 보내면 rclpy 시그널 핸들러가 이미 컨텍스트를 내려서
+        # 여기서 또 부르면 RCLError를 뱉는다(동작엔 영향 없지만 매번 traceback).
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

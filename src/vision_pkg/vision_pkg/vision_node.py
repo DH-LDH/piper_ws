@@ -365,6 +365,16 @@ class VisionNode(Node):
                 best_rv = rv; best_rep = float(reps[kk]) if kk < len(reps) else 0.0
         return best, best_rv, best_rep
 
+    def _marker_body_yaw(self, rvec, R_bc):
+        """마커 자신의 +Y축을 body XY 평면에 투영한 방향[rad].
+        위치 변환이 p_body = R_bc @ (D @ p_cam) + t_bc 이므로, 회전은 같은 D로
+        닮음변환해서 R_body = R_bc @ D @ R_cam @ D 가 된다(D는 ±1 대각이라 D⁻¹=D)."""
+        R_cm, _ = cv2.Rodrigues(rvec)
+        D = self._eih_axis_diag
+        R_bm = R_bc @ D @ R_cm @ D
+        ay = R_bm[:, 1]
+        return math.atan2(float(ay[1]), float(ay[0]))
+
     def _eih_reproj_ok(self, corners, rep, tag):
         """손목캠 재투영 게이트 — (통과여부, 마커 한 변 픽셀길이, 상대오차).
         px 절대값과 마커 크기 대비 비율을 둘 다 봐야 원거리/근접이 같은 기준이 된다."""
@@ -431,8 +441,9 @@ class VisionNode(Node):
         if _sol is not None:
             _p_usd = self._eih_axis_diag @ _sol[0]
             _p_body = R_bc @ _p_usd + t_bc
+            _yaw = self._marker_body_yaw(_sol[1], R_bc)
             self.pub_place_marker.publish(Float32MultiArray(
-                data=pack_eih_marker(_p_body[0], _p_body[1], _p_body[2], True)))
+                data=pack_eih_marker(_p_body[0], _p_body[1], _p_body[2], True, _yaw)))
         else:
             self.pub_place_marker.publish(Float32MultiArray(data=pack_eih_marker(0, 0, 0, False)))
 
@@ -462,7 +473,8 @@ class VisionNode(Node):
         p_usd = self._eih_axis_diag @ best
         p_body = R_bc @ p_usd + t_bc
         self.pub_eih.publish(Float32MultiArray(
-            data=pack_eih_marker(p_body[0], p_body[1], p_body[2], True)))
+            data=pack_eih_marker(p_body[0], p_body[1], p_body[2], True,
+                                  self._marker_body_yaw(rvec, R_bc))))
 
         # 2초마다 진단 — 캘리브레이션 때 화면을 안 봐도 런치 로그에 그대로 남는다.
         self.eih_hit += 1
@@ -492,7 +504,10 @@ def main():
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # launch가 SIGINT를 보내면 rclpy 시그널 핸들러가 이미 컨텍스트를 내려서
+        # 여기서 또 부르면 RCLError를 뱉는다(동작엔 영향 없지만 매번 traceback).
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

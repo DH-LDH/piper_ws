@@ -68,7 +68,12 @@ PLACE_LOWER_DIST = 0.02         # [m] place_lock 시점 팔 자세에서 그리�
 #                            놓는다. 물체를 마커 위에 그대로 올리면 (a)마커를 덮어버려
 #                            재검출이 끊기고 (b)쥔 물체가 마커 시야를 가린다. 마커 한 변
 #                            (34mm)만큼 당기면 마커 근접모서리 바로 바깥에 놓인다.
-PLACE_INSET_M       = 0.034   # [m] 마커 중심→놓는점, 팔 베이스 방향 (= 마커 한 변)
+# 당기는 방향은 place_inset_mode로 고른다:
+#   "marker_y"(실물 기본): 마커 자신의 -Y 방향. 마커를 선반에 비스듬히 붙여도 "마커
+#                           기준 앞쪽"이 그대로 따라간다(vision이 yaw를 같이 발행).
+#   "body_y":              body -Y(팔 베이스 쪽 정면) 고정.
+#   "radial":              body 원점→마커 수평방향의 반대(종전 동작).
+PLACE_INSET_M       = 0.035   # [m] 마커 중심→놓는점 거리 (마커 한 변 34mm와 같은 값)
 PLACE_RELEASE_GAP   = 0.005   # [m] 릴리즈 시 물체 바닥과 선반면 사이 간격
 PLACE_RETREAT_DIST  = 0.05    # [m] 릴리즈 후 수직 후퇴 거리(초기자세 복귀 전 물체를 안 건드리게)
 
@@ -112,6 +117,11 @@ VERIFY_LOW_HITS   = 2     # 낮은 높이 관측이 이만큼 쌓이면 실패 �
 # (빈손이어도 손가락끼리 눌리면 접촉으로 잡힌다). 그래서 스트로크가 주 판정근거다.
 GRIP_VERIFY_WINDOW_N   = 60    # [스텝, 1s] 리프트 완료 후 그리퍼 상태 관찰 시간
 GRIP_VERIFY_MIN_SAMPLE = 10    # 이만큼은 받아야 판정한다(토픽 유실 방어)
+# ★ 보고되는 개구부는 "손가락 패드 사이 실제 간격"이 아니다. 실기 실측(2026-09-20):
+# 16.36mm 물체를 정상 파지했는데 25.9mm로 보고됐다 — 패드 두께 등으로 상수만큼 크게
+# 나온다(영점 미설정 영향도 있음). 이 오프셋을 빼지 않으면 판정선이 통째로 어긋난다.
+# 재기 방법: 아무것도 없이 그리퍼를 닫고 그때 보고되는 개구부가 곧 이 값이다.
+GRIP_STROKE_OFFSET_MM  = 0.0   # [mm] 보고값 − 실제 간격 (launch: grip_stroke_offset_mm)
 GRIP_STROKE_MIN_RATIO  = 0.50  # 물체 폭 대비 이 비율 밑이면 "사이에 아무것도 없다"
 GRIP_STROKE_MARGIN_MM  = 10.0  # [mm] 물체 폭+이 값보다 넓으면 "물체를 안 물었다"(덜 닫힘)
 GRIP_SLIP_DROP_MM      = 3.0   # [mm] 그립 직후 대비 이만큼 더 닫히면 리프트 중 놓친 것
@@ -199,6 +209,7 @@ class ArmNode(Node):
         self.hover_wait_n = 0  # hover 단계의 같은 카운터
         self.lift_wait_n = 0   # lift 단계의 같은 카운터
         self.retreat_wait_n = 0  # place_retreat 단계의 같은 카운터
+        self.place_hover_wait_n = 0  # place_hover 단계의 같은 카운터
 
         self.grip_contact_result = None  # /gripper/done 수신 시 세팅
         self.grasp_attempt = 0  # 재시도 횟수 (0=첫 시도)
@@ -211,6 +222,8 @@ class ArmNode(Node):
         # 타겟 치수 — 폭은 그리퍼 판정(스트로크), 높이는 place 릴리즈 높이에 쓴다.
         self.obj_width_m = float(self.declare_parameter("obj_width_m", OBJ_S).value)
         self.obj_height_m = float(self.declare_parameter("obj_height_m", OBJ_S).value)
+        self.grip_stroke_offset = float(
+            self.declare_parameter("grip_stroke_offset_mm", GRIP_STROKE_OFFSET_MM).value)
 
         # 그리퍼 기반 파지 판정 상태
         self.grip_stroke = None       # 최신 개구부[mm]
@@ -254,6 +267,12 @@ class ArmNode(Node):
         self.place_point_mode = str(
             self.declare_parameter("place_point_mode", "shelf_geom").value)
         self.place_inset = float(self.declare_parameter("place_inset_m", PLACE_INSET_M).value)
+        self.place_inset_mode = str(
+            self.declare_parameter("place_inset_mode", "radial").value)
+        if self.place_inset_mode not in ("marker_y", "body_y", "radial"):
+            print(f"  ★ place_inset_mode={self.place_inset_mode} 알 수 없음 — radial로 진행")
+            self.place_inset_mode = "radial"
+        self.place_top_yaw = None    # 손목캠이 본 place 마커의 body 기준 +Y 방향[rad]
         self.place_release_gap = float(
             self.declare_parameter("place_release_gap", PLACE_RELEASE_GAP).value)
         # 쥔 물체가 마커 시야를 가리므로 최초 검출 후엔 목표를 얼어붙이고 맹목 하강한다.
@@ -349,8 +368,10 @@ class ArmNode(Node):
     def _on_place_marker(self, msg: Float32MultiArray):
         """손목캠이 본 place 마커(body_link 상대) — place_detect/place_descend가
         이걸로 실시간 보정한다(_on_eih의 place 버전, _place_point() 참고)."""
-        x, y, z, valid = unpack_eih_marker(msg.data)
+        x, y, z, valid, yaw = unpack_eih_marker(msg.data)
         self.place_top_new = (np.array([x, y, z], float) if valid else None)
+        if valid:
+            self.place_top_yaw = float(yaw)
 
     def _on_chassis_pose(self, msg: Float32MultiArray):
         bx, by, phi, valid, marker_id, sim_step, bz = unpack_chassis_pose(msg.data)
@@ -418,6 +439,23 @@ class ArmNode(Node):
             return self._place_point_marker_inset(mk)
         return self._place_point_shelf_geom(mk)
 
+    def _place_inset_dir(self, mk_w):
+        """마커 중심에서 놓는점까지 "어느 방향으로" 비킬지 — body XY 단위벡터."""
+        if self.place_inset_mode == "marker_y":
+            if self.place_top_yaw is None:
+                # 마커를 아직 못 봤다(사전 추정치로 계산 중) — radial로 폴백한다.
+                print("    ★ [place] marker_y 모드인데 마커 yaw 미수신 — radial로 폴백")
+            else:
+                # 마커 자신의 -Y (+Y축 방향이 place_top_yaw)
+                return np.array([-np.cos(self.place_top_yaw),
+                                  -np.sin(self.place_top_yaw)])
+        elif self.place_inset_mode == "body_y":
+            return np.array([0.0, -1.0])
+        v = mk_w[:2]
+        n = float(np.linalg.norm(v))
+        # 베이스 바로 위(n≈0)면 방향이 정의되지 않는다 — 그땐 당기지 않는다.
+        return -v / n if n > 1e-6 else np.zeros(2)
+
     def _place_point_marker_inset(self, mk):
         """[실물] 마커 중심에서 팔 베이스 쪽으로 place_inset만큼 당긴 지점에 놓는다.
         물체를 마커 위에 그대로 올리면 마커가 덮여 재검출이 끊기고, 쥔 물체가 시야도
@@ -425,12 +463,9 @@ class ArmNode(Node):
         손끝은 물체 윗면보다 grasp_depth_extra만큼 아래를 쥐고 있으므로(_grasp_point),
         손끝~물체 바닥 거리는 (물체높이 - grasp_depth_extra)다."""
         mk_w = mk + np.array([0.0, 0.0, self.body_link_world_z])
-        v = mk_w[:2]
-        n = float(np.linalg.norm(v))
-        # 베이스 바로 위(n≈0)면 방향이 정의되지 않는다 — 그땐 당기지 않는다.
-        u = v / n if n > 1e-6 else np.zeros(2)
-        tip = np.array([mk_w[0] - u[0]*self.place_inset,
-                        mk_w[1] - u[1]*self.place_inset,
+        u = self._place_inset_dir(mk_w)
+        tip = np.array([mk_w[0] + u[0]*self.place_inset,
+                        mk_w[1] + u[1]*self.place_inset,
                         mk_w[2] + self.place_release_gap
                         + (self.obj_height_m - self.grasp_depth_extra)])
         # 깊이는 순수 수직으로, 그리퍼 길이만 접근축으로 — _grasp_point()와 같은 규약.
@@ -506,8 +541,10 @@ class ArmNode(Node):
     def _verify_by_gripper(self):
         """그리퍼 개구부+접촉만으로 파지 성공 여부를 판정한다(None=판정 보류).
         차체캠이 없는 실물 v1의 기본 경로 — 카메라 시야/오클루전에 의존하지 않는다."""
-        lo = self.obj_width_m * 1000.0 * GRIP_STROKE_MIN_RATIO
-        hi = self.obj_width_m * 1000.0 + GRIP_STROKE_MARGIN_MM
+        # 판정선은 "보고값" 스케일로 옮겨서 비교한다(위 GRIP_STROKE_OFFSET_MM 설명 참고).
+        w = self.obj_width_m * 1000.0
+        lo = self.grip_stroke_offset + w * GRIP_STROKE_MIN_RATIO
+        hi = self.grip_stroke_offset + w + GRIP_STROKE_MARGIN_MM
 
         if self.grip_stroke is None:
             # 토픽이 아예 안 온다 — 판정 근거가 없으므로 접촉 플래그로 폴백한다.
@@ -521,8 +558,8 @@ class ArmNode(Node):
         # 빈손: 손가락이 물체 폭 아래까지 닫혔다 → 사이에 아무것도 없다(즉시 확정).
         if self.grip_stroke_min is not None and self.grip_stroke_min < lo:
             print(f"    [파지 판정/그리퍼] 최소 개구부 {self.grip_stroke_min:.1f}mm < "
-                  f"하한 {lo:.1f}mm (물체폭 {self.obj_width_m*1000:.1f}mm×"
-                  f"{GRIP_STROKE_MIN_RATIO:.2f}) → 실패(헛집음/놓침)")
+                  f"하한 {lo:.1f}mm (물체폭 {w:.1f}mm×{GRIP_STROKE_MIN_RATIO:.2f} "
+                  f"+ 오프셋 {self.grip_stroke_offset:.1f}mm) → 실패(헛집음/놓침)")
             return False
 
         # 슬립: 그립 완료 시점보다 눈에 띄게 더 닫혔다 → 리프트 중 빠져나갔다.
@@ -548,6 +585,12 @@ class ArmNode(Node):
         print(f"    [파지 판정/그리퍼] 개구부 {self.grip_stroke:.1f}mm "
               f"(허용 {lo:.1f}~{hi:.1f}mm, 최소 {self.grip_stroke_min:.1f}mm) "
               f"접촉 유지 effort={self.grip_effort:.2f} 샘플 {self.grip_v_n} → 성공(들고 있음)")
+        # 판정선 가장자리에 붙으면 다음 런에서 뒤집힌다 — 오프셋 재조정 신호.
+        near = min(self.grip_stroke - lo, hi - self.grip_stroke)
+        if near < 3.0:
+            print(f"    ★ [주의] 판정선까지 {near:.1f}mm밖에 안 남았다 — "
+                  f"grip_stroke_offset_mm(현재 {self.grip_stroke_offset:.1f})를 "
+                  f"실측으로 맞출 것(빈손으로 닫았을 때의 보고값)")
         return True
 
     def _verify(self):
@@ -591,7 +634,7 @@ class ArmNode(Node):
         self.arm_phase = "hover"; self.arm_step = 0
 
     def _on_eih(self, msg: Float32MultiArray):
-        x, y, z, valid = unpack_eih_marker(msg.data)
+        x, y, z, valid, _yaw = unpack_eih_marker(msg.data)
         self.eih_new = (np.array([x, y, z], float) if valid else None)
 
         if self.arm_phase == "detect":
@@ -928,7 +971,8 @@ class ArmNode(Node):
                 if self.grip_stroke_at_grip is not None:
                     print(f"       [판정기준] 그립 직후 개구부 "
                           f"{self.grip_stroke_at_grip:.1f}mm (물체폭 "
-                          f"{self.obj_width_m*1000:.1f}mm 기대)")
+                          f"{self.obj_width_m*1000:.1f}mm + 오프셋 "
+                          f"{self.grip_stroke_offset:.1f}mm 기대)")
                 self.arm_phase = "lift"; self.arm_step = 0
 
         elif ap == "lift":
@@ -980,11 +1024,16 @@ class ArmNode(Node):
                                   else self.ml_place_center.copy())
                 self.ml_target = (self.ml_place_center
                                    - self.place_approach_dir * (HOVER_STANDOFF + self.ee_grip_offset))
+                self.place_hover_wait_n = 0
                 self.arm_phase = "place_hover"; self.arm_step = 0
 
         elif ap == "place_hover":
             done = self._move_l(EE_SPEED_HOVER)
             if done:
+                # 여기서 뒤처진 채 검출하면 place 마커를 예상보다 먼 거리에서 재게 된다.
+                if not self._wait_physical_arrive("place_hover_wait_n",
+                                                   PRE_ARRIVE_TOL, "place_hover"):
+                    return
                 print(f"  [팔] PLACE HOVER 도달 → 상판 마커 검출")
                 self.ml_place_anchor = None
                 self.arm_phase = "place_detect"; self.arm_step = 0
@@ -994,6 +1043,31 @@ class ArmNode(Node):
             if self.place_top_new is not None:
                 pt = self._place_point(self.place_top_new)
                 print(f"\n  [팔] 상판 마커 검출 ✓ (몸체) {self.place_top_new.round(4)}")
+                if self.place_point_mode == "marker_inset":
+                    _mkw = self.place_top_new + np.array([0.0, 0.0, self.body_link_world_z])
+                    _u = self._place_inset_dir(_mkw)
+                    _yaw_s = ("-" if self.place_top_yaw is None
+                              else f"{np.degrees(self.place_top_yaw):+.1f}deg")
+                    print(f"       오프셋 {self.place_inset*1000:.0f}mm "
+                          f"방향=({_u[0]:+.3f},{_u[1]:+.3f}) "
+                          f"모드={self.place_inset_mode} 마커yaw={_yaw_s}")
+                    # 마커를 로봇 정면에 반듯이 붙이면 marker_y와 radial이 거의 겹쳐서
+                    # 어느 모드가 먹었는지 구분이 안 된다 — 세 후보를 같이 찍는다.
+                    _v = _mkw[:2]; _n = float(np.linalg.norm(_v))
+                    _cand = {
+                        "marker_y": (None if self.place_top_yaw is None else
+                                      np.array([-np.cos(self.place_top_yaw),
+                                                -np.sin(self.place_top_yaw)])),
+                        "body_y": np.array([0.0, -1.0]),
+                        "radial": (-_v/_n if _n > 1e-6 else np.zeros(2)),
+                    }
+                    _parts = []
+                    for _k, _d in _cand.items():
+                        if _d is None:
+                            _parts.append(f"{_k}=미수신"); continue
+                        _diff = np.degrees(np.arccos(np.clip(float(_d @ _u), -1.0, 1.0)))
+                        _parts.append(f"{_k}=({_d[0]:+.3f},{_d[1]:+.3f}) Δ{_diff:.1f}°")
+                    print(f"       방향후보 " + "  ".join(_parts))
                 print(f"       놓는점 {pt.round(4)}  (사전 추정치는 "
                       f"{self._place_point_from_guess().round(4)})")
                 self.ml_place_anchor = pt.copy()
@@ -1127,7 +1201,10 @@ def main():
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # launch가 SIGINT를 보내면 rclpy 시그널 핸들러가 이미 컨텍스트를 내려서
+        # 여기서 또 부르면 RCLError를 뱉는다(동작엔 영향 없지만 매번 traceback).
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
