@@ -35,23 +35,23 @@ MARKER_ID_DEFAULT = 0
 MARKER_SIZE_DEFAULT = 0.034   # [m] 현재 설정값 — 스케일 추정이 이걸 얼마나 고쳐야 하는지 알려준다
 
 
-def _Ry(a):
+def _Ry(a):  # y축 회전행렬
     c, s = np.cos(a), np.sin(a)
     return np.array([[c, 0., s], [0., 1., 0.], [-s, 0., c]])
 
 
-def _Rz(a):
+def _Rz(a):  # z축 회전행렬
     c, s = np.cos(a), np.sin(a)
     return np.array([[c, -s, 0.], [s, c, 0.], [0., 0., 1.]])
 
 
-def _R_l6_cam(pitch_rad, roll_rad):
+def _R_l6_cam(pitch_rad, roll_rad):  # link6→카메라 회전 — 카메라 노드와 같은 규약(Ry 후 Rz)이어야 한다
     """piper_eih_camera_node._publish_cam_tcp_tf()와 같은 규약: R = Ry(pitch) @ Rz(roll)."""
     return _Ry(pitch_rad) @ _Rz(roll_rad)
 
 
-class EihCalib(Node):
-    def __init__(self, marker_id, marker_size):
+class EihCalib(Node):  # 손목캠 외부파라미터 캘리브 — 여러 자세에서 같은 마커를 본 결과로 푼다
+    def __init__(self, marker_id, marker_size):  # 마커 모델·검출기·TF 버퍼 준비
         super().__init__("eih_cam_calib")
         self.marker_id = marker_id
         self.marker_size = marker_size
@@ -72,10 +72,10 @@ class EihCalib(Node):
         self.create_subscription(CameraInfo, "/vision/eih_camera_info", self._on_info, _LATCH)
         self.create_subscription(Image, "/vision/eih_image", self._on_image, 5)
 
-    def _on_info(self, msg: CameraInfo):
+    def _on_info(self, msg: CameraInfo):  # 카메라 내부파라미터 K 수신
         self.K = np.array(msg.k, float).reshape(3, 3)
 
-    def _on_image(self, msg: Image):
+    def _on_image(self, msg: Image):  # 매 프레임 마커를 풀어 최신 결과만 보관(캡처 때 꺼내 쓴다)
         if self.K is None:
             return
         rgba = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 4)
@@ -104,7 +104,7 @@ class EihCalib(Node):
                 best_rep = float(reps[kk]) if kk < len(reps) else 0.0
         self.latest = (best, best_rep)
 
-    def capture(self):
+    def capture(self):  # 지금 자세의 (마커 카메라좌표, body_link→link6) 한 쌍을 채집
         """현재 프레임의 (카메라좌표 마커위치, body_link→link6 변환)을 한 쌍 잡는다."""
         if self.latest is None:
             return None, "마커 미검출"
@@ -119,7 +119,7 @@ class EihCalib(Node):
         return (p_cam, R_b_l6, t_b_l6, rep), None
 
 
-def _body_points(samples, pitch, roll, off, scale):
+def _body_points(samples, pitch, roll, off, scale):  # 주어진 오프셋으로 각 샘플의 마커를 body 좌표로 옮긴다
     R_lc = _R_l6_cam(pitch, roll)
     return np.array([R_b_l6 @ (R_lc @ (p_cam * scale) + off) + t_b_l6
                      for (p_cam, R_b_l6, t_b_l6, _) in samples])
@@ -131,17 +131,17 @@ _LO = [-np.pi, -np.pi, -0.30, -0.30, -0.30, 0.5]
 _HI = [ np.pi,  np.pi,  0.30,  0.30,  0.30, 2.0]
 
 
-def _fit(samples, x0, free, label):
+def _fit(samples, x0, free, label):  # 자세가 달라져도 마커가 한 점에 모이도록 오프셋을 최적화
     """free에 든 파라미터만 풀고 나머지는 x0 고정. 반환: (해, 편차 RMS[mm])."""
     idx = {"pitch": 0, "roll": 1, "x": 2, "y": 3, "z": 4, "scale": 5}
     fi = [idx[k] for k in free]
 
-    def unpack(v):
+    def unpack(v):  # 자유 파라미터 벡터를 전체 6개 파라미터로 되돌린다
         x = np.array(x0, float)
         x[fi] = v
         return x
 
-    def resid(v):
+    def resid(v):  # 잔차 = 마커 위치가 자세마다 흩어진 정도(0이 정답)
         x = unpack(v)
         pts = _body_points(samples, x[0], x[1], x[2:5], x[5])
         return (pts - pts.mean(0)).ravel()   # 자세마다 달라지는 정도 = 오차
@@ -164,7 +164,7 @@ def _fit(samples, x0, free, label):
 SAMPLE_FILE = "eih_calib_samples.npz"
 
 
-def _save(samples):
+def _save(samples):  # 채집한 샘플을 npz로 저장 — 나중에 --load로 재분석
     np.savez(SAMPLE_FILE,
              p_cam=np.array([s[0] for s in samples]),
              R=np.array([s[1] for s in samples]),
@@ -174,12 +174,12 @@ def _save(samples):
           f"(재분석: python3 {sys.argv[0]} --load)")
 
 
-def _load():
+def _load():  # 저장된 샘플 불러오기
     d = np.load(SAMPLE_FILE)
     return list(zip(d["p_cam"], d["R"], d["t"], d["rep"]))
 
 
-def _report(samples, marker_size):
+def _report(samples, marker_size):  # 자유도를 늘려가며 풀어보고 어느 항이 오차를 줄이는지 비교 출력
     if len(samples) < 4:
         print(f"\n자세가 {len(samples)}개뿐이라 풀 수 없습니다 (최소 4개).")
         return
@@ -203,7 +203,7 @@ def _report(samples, marker_size):
     print(f"적용: piper_eih_camera_node의 cam_tcp_offset_pitch_deg / _roll_deg / _x / _y / _z")
 
 
-def main():
+def main():  # 캡처 모드(Enter로 자세 채집) 또는 --load 재분석 모드
     if "--load" in sys.argv:
         samples = _load()
         print(f"{SAMPLE_FILE}에서 {len(samples)}자세 로드")
