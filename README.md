@@ -106,14 +106,8 @@ ros2 launch piper_hw_pkg piper_real.launch.py really_enable:=true move_spd_rate_
 
 ---
 
-## 더 읽을 것
+## 참고용
 
 **[docs/CODE_WALKTHROUGH.md](docs/CODE_WALKTHROUGH.md)** — 제어 알고리즘, 그리핑, 마커 검출을 코드 위치와 함께 설명한다. 상태기계 전이, α-SMC 제어칙, 평면 마커의 자세 이중해, 재투영 오차 게이트, 파지점 유도 같은 것들을 다룬다.
 
-## 이력
 
-이 워크스페이스는 Isaac Sim 시뮬레이션으로 시작해 실물 PiPER로 옮겨왔다. 시뮬레이션 전용 코드는 `sim-archive` 브랜치와 `sim-final` 태그에 보존돼 있다.
-
-```bash
-git show sim-final:src/plant_pkg/plant_pkg/plant_node.py
-```
