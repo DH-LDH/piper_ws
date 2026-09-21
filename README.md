@@ -22,8 +22,8 @@ flowchart LR
   VIS -->|마커 body 좌표| ARM[arm_node<br/>상태기계]
   ARM -->|목표점 / 관절목표| DRV
   ARM -->|열기 닫기| GRP[gripper_node<br/>alpha-SMC]
-  GRP -->|개구부 지령| DRV
-  DRV -->|개구부 토크| GRP
+  GRP -->|그리퍼 지령| DRV
+  DRV -->|그리퍼 토크| GRP
   GRP -->|그립 상태| ARM
   DRV -->|EE 위치| ARM
 ```
@@ -39,10 +39,6 @@ flowchart LR
 | `robot_state_publisher` | — | URDF 기반 링크 TF |
 
 ---
-vision_node  ──마커 위치──▶  arm_node  ──목표──▶  piper_driver_node ──CAN──▶ 팔
-     ▲                          │                        │
-     │                          ▼                        ▼
-piper_eih_camera_node      piper_gripper_node      피드백(joint_states, ee_pose)
 
 
 ## 빌드
