@@ -95,7 +95,7 @@ class VisionNode(Node):
         self.det = _make_detector(self.declare_parameter("corner_refine", CORNER_REFINE).value)
         self.dist = np.zeros(5)
         self.eih_K = None
-        # [차체캠] 되살릴 때 아래 주석을 풀 것
+        # [차체캠] 
         # self.clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         # self.faces = compute_marker_faces()
         # _n_front = np.array([0., -1., 0.])
@@ -116,8 +116,6 @@ class VisionNode(Node):
         _h = self.pick_marker_size / 2.0
         self.pick_top_pts = np.array([[-_h, _h, 0.], [_h, _h, 0.],
                                        [_h, -_h, 0.], [-_h, -_h, 0.]], np.float32)
-        # place 지그 상판 마커 — 실물은 픽 마커와 같은 34mm를 쓰는데, 예전엔 TOP_PTS(20mm)로
-        # 풀어서 거리가 20/34배로 축소돼 나왔다(놓는점이 통째로 틀어짐).
         self.place_marker_id = int(
             self.declare_parameter("eih_place_marker_id", PLACE_TOP_MARKER_ID).value)
         self.place_marker_size = float(
@@ -130,16 +128,16 @@ class VisionNode(Node):
         self.eih_reproj_max_rel = float(
             self.declare_parameter("eih_reproj_max_rel", EIH_REPROJ_MAX_REL).value)
 
-        # 실제 파이프라인이 쓰는 검출/포즈를 그대로 그려서 발행 — 별도 디버그 노드와 달리
-        # 여기서 보이는 값이 곧 /vision/eih_marker_body로 나가는 값이다.
+        # 실제 파이프라인이 쓰는 검출/포즈를 그대로 그려서 발행 
+        # 여기서 보이는 값이 곧 /vision/eih_marker_body로 나가는 값
         self.eih_debug_view = bool(self.declare_parameter("eih_debug_view", False).value)
         self.pub_eih_debug = (self.create_publisher(Image, "/vision/eih_debug_image", 5)
                                if self.eih_debug_view else None)
 
-        self.eih_hit = 0   # 손목캠 픽 마커 검출 수 — 주기적 진단 출력 간격 계산용
+        self.eih_hit = 0   # 손목캠 픽 마커 검출 수 
         self.eih_rej_rep = 0     # 재투영 게이트에서 기각된 픽 마커 프레임 수
-        self.eih_rep_max = 0.0   # 통과한 프레임의 최대 rep(px) — 게이트 재조정 근거
-        # [차체캠] 되살릴 때 아래 주석을 풀 것
+        self.eih_rep_max = 0.0   # 통과한 프레임의 최대 rep(px) 
+        # [차체캠] 
         # self.cam_hit = 0; self.cam_miss = 0
         # self.rej_up = 0; self.rej_rep = 0
         # self._place_rej = 0
@@ -255,7 +253,7 @@ class VisionNode(Node):
         if dbg is not None and ids is not None:
             cv2.aruco.drawDetectedMarkers(dbg, cs, ids)
 
-        # place 지그 상판 마커 — 별도 토픽으로 항상 같이 처리
+        # place 지그 상판 마커 
         _sol, _pc = None, None
         if self.place_marker_id in id_list:
             _pc = cs[id_list.index(self.place_marker_id)].reshape(4, 2)
@@ -299,7 +297,7 @@ class VisionNode(Node):
             data=pack_eih_marker(p_body[0], p_body[1], p_body[2], True,
                                   self._marker_body_yaw(rvec, R_bc))))
 
-        # 2초마다 진단 — 캘리브레이션 때 화면을 안 봐도 런치 로그에 그대로 남는다.
+        # 2초마다 진단 
         self.eih_hit += 1
         if self.eih_hit % EIH_PRINT_EVERY == 1:
             print(f"    [진단-eih] ID{self.pick_marker_id} size={self.pick_marker_size*1000:.1f}mm  "
