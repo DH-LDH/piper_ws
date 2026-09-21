@@ -402,8 +402,8 @@ z_명령 = 마커z + ee_grip_offset − grasp_depth_extra
 | `step22_common.py`의 sim 씬 상수 (심볼 93개) | 129 |
 | `piper_description`의 미사용 urdf/rviz/mujoco/launch | 19개 파일 |
 
-전부 `sim-archive` 브랜치와 `sim-final` 태그에 있다. 상세는
-[HANDOFF_JETSON.md](../HANDOFF_JETSON.md) 8.1절.
+전부 `sim-archive` 브랜치와 `sim-final` 태그에 있다.
+`git show sim-final:src/plant_pkg/plant_pkg/plant_node.py` 처럼 꺼내 볼 수 있다.
 
 ### 차체 카메라 코드는 왜 남겼나
 
