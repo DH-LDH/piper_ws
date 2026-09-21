@@ -22,19 +22,19 @@ from std_msgs.msg import Bool, String
 _LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
-class StepConfirm(Node):
-    def __init__(self):
+class StepConfirm(Node):  # step_confirm 모드 진행 승인 도구 — Enter마다 신호 1회
+    def __init__(self):  # 승인 발행자와 대기단계 구독자 등록
         super().__init__("step_confirm")
         self.pub = self.create_publisher(Bool, "/arm/step_confirm", 10)
         self.waiting_phase = None
         self.create_subscription(String, "/arm/step_wait", self._on_step_wait, _LATCH)
 
-    def _on_step_wait(self, msg: String):
+    def _on_step_wait(self, msg: String):  # arm_node가 어느 단계에서 멈췄는지 수신해 화면에 알린다
         self.waiting_phase = msg.data
         print(f"\n  [대기] '{msg.data}' 단계 — Enter를 치면 진행합니다")
 
 
-def main():
+def main():  # Enter 입력 루프 — 스핀은 블로킹을 피해 별도 스레드에서 돈다
     rclpy.init()
     node = StepConfirm()
     # input()이 블로킹이라 스핀은 별도 스레드에서 — 안 그러면 대기 단계 알림을 못 받는다.
