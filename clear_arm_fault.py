@@ -20,7 +20,7 @@ import time
 from piper_sdk import C_PiperInterface_V2
 
 
-def main():
+def main():  # CAN으로 복구 명령을 보내 arm_status fault를 푼다
     print("  ★ 팔을 손으로 받쳤는지 확인하세요 — 복구 직후 짧게 처질 수 있습니다.")
     input("  준비됐으면 Enter: ")
 

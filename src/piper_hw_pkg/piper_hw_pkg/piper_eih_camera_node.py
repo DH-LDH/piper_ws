@@ -31,15 +31,12 @@ PUBLISH_HZ = 15.0
 CAM_TCP_OFFSET_X_DEFAULT = -0.085          # [m] 상하
 CAM_TCP_OFFSET_Y_DEFAULT = -0.01           # [m] 좌우
 CAM_TCP_OFFSET_Z_DEFAULT = 0.026           # [m] 앞뒤
-# ★ pitch는 각도계로 재면 안 된다. 카메라 하우징 기준면과 센서 광축이 일치한다는
-# 보장이 없어 12.5° 틀린 적이 있다. 각도 오차는 거리에 비례하는 지향 오차로 나타나서
-# 팔이 다가갈수록 추정 위치가 움직인다 — eih_cam_calib.py로 산출한 값을 쓸 것.
-CAM_TCP_OFFSET_PITCH_DEG_DEFAULT = 27.5    # [deg] 틸트(link6 y축 회전)
-CAM_TCP_OFFSET_ROLL_DEG_DEFAULT = -90.0    # [deg] 광축 롤 — 카메라 이미지 좌우를 로봇 좌우에 맞춤
+CAM_TCP_OFFSET_PITCH_DEG_DEFAULT = 27.5    # [deg] 틸트
+CAM_TCP_OFFSET_ROLL_DEG_DEFAULT = -90.0    # [deg] 광축 
 
 
-class PiperEihCameraNode(Node):
-    def __init__(self):
+class PiperEihCameraNode(Node):  # RealSense D455 → /vision/eih_image + link6→eih_cam TF
+    def __init__(self):  # 파라미터·TF·RealSense 기동, 캡처 스레드 시작
         super().__init__("piper_eih_camera_node")
 
         self._latest_rgba = None
@@ -71,7 +68,6 @@ class PiperEihCameraNode(Node):
                           [0.0, intr.fy, intr.ppy],
                           [0.0, 0.0, 1.0]])
             D = np.array(intr.coeffs)
-            # vision_node.py는 왜곡계수 없이 K만 쓰므로 여기서 미리 undistort해둔다.
             self.map1, self.map2 = cv2.initUndistortRectifyMap(
                 K, D, None, K, (FRAME_WIDTH, FRAME_HEIGHT), cv2.CV_16SC2)
 
@@ -79,7 +75,7 @@ class PiperEihCameraNode(Node):
             info = CameraInfo()
             info.width, info.height = FRAME_WIDTH, FRAME_HEIGHT
             info.k = K.flatten().tolist()
-            info.d = [0.0] * 5  # 아래에서 undistort된 프레임을 발행하므로 발행 이미지 기준 왜곡 없음
+            info.d = [0.0] * 5  
             self.pub_info.publish(info)
             self.get_logger().info(
                 f"RealSense 팩토리 캘리브레이션 적용: fx={intr.fx:.1f} fy={intr.fy:.1f} "
@@ -95,7 +91,7 @@ class PiperEihCameraNode(Node):
         self.create_timer(1.0 / PUBLISH_HZ, self._on_timer)
         self.get_logger().info("piper_eih_camera_node 초기화 완료 (RealSense D455)")
 
-    def _publish_cam_tcp_tf(self, x=None, y=None, z=None, pitch_deg=None, roll_deg=None):
+    def _publish_cam_tcp_tf(self, x=None, y=None, z=None, pitch_deg=None, roll_deg=None):  # link6→eih_cam 정적 TF 발행 — 손목캠 장착 위치와 틸트를 좌표계에 반영
         x = float(self.get_parameter("cam_tcp_offset_x").value) if x is None else x
         y = float(self.get_parameter("cam_tcp_offset_y").value) if y is None else y
         z = float(self.get_parameter("cam_tcp_offset_z").value) if z is None else z
@@ -124,7 +120,7 @@ class PiperEihCameraNode(Node):
             f"link6→eih_cam TF 발행: xyz=({x:.3f},{y:.3f},{z:.3f}) "
             f"pitch={pitch_deg:.1f}deg roll={roll_deg:.1f}deg")
 
-    def _on_cam_tcp_params_set(self, params):
+    def _on_cam_tcp_params_set(self, params):  # 오프셋 파라미터가 바뀌면 TF 즉시 재발행(실시간 캘리브용)
         # get_parameter는 아직 옛값이라 변경분은 params에서 직접 읽는다.
         overrides = {p.name: p.value for p in params}
         self._publish_cam_tcp_tf(
@@ -135,7 +131,7 @@ class PiperEihCameraNode(Node):
             roll_deg=overrides.get("cam_tcp_offset_roll_deg"))
         return SetParametersResult(successful=True)
 
-    def _capture_loop(self):
+    def _capture_loop(self):  # 별도 스레드 — 프레임 받아 왜곡보정 후 최신 1장만 보관
         while not self._stop_capture.is_set():
             try:
                 frames = self.pipeline.wait_for_frames(1000)
@@ -150,7 +146,7 @@ class PiperEihCameraNode(Node):
             with self._latest_lock:
                 self._latest_rgba = rgba
 
-    def _on_timer(self):
+    def _on_timer(self):  # 15Hz로 최신 프레임을 /vision/eih_image에 발행
         with self._latest_lock:
             rgba = self._latest_rgba
         if rgba is None:
@@ -163,7 +159,7 @@ class PiperEihCameraNode(Node):
         msg.data = array.array("B", rgba.tobytes())  # bytes 그대로 넣으면 publish()가 ~200ms로 느려짐
         self.pub_image.publish(msg)
 
-    def destroy_node(self):
+    def destroy_node(self):  # 종료 시 캡처 스레드와 RealSense 파이프라인 정리
         self._stop_capture.set()
         if self._capture_thread is not None:
             self._capture_thread.join(timeout=2.0)
@@ -172,7 +168,7 @@ class PiperEihCameraNode(Node):
         super().destroy_node()
 
 
-def main():
+def main():  # 노드 기동 진입점
     rclpy.init()
     node = PiperEihCameraNode()
     try:
@@ -181,8 +177,6 @@ def main():
         pass
     finally:
         node.destroy_node()
-        # launch가 SIGINT를 보내면 rclpy 시그널 핸들러가 이미 컨텍스트를 내려서
-        # 여기서 또 부르면 RCLError를 뱉는다(동작엔 영향 없지만 매번 traceback).
         if rclpy.ok():
             rclpy.shutdown()
 

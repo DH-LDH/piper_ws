@@ -16,20 +16,10 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo
 
-# 손목캠 마커 검출을 눈으로 확인하는 독립 뷰어. 자체적으로 검출/PnP를 돌리므로
-# vision_node가 실제로 쓰는 값과는 다를 수 있다 — 파이프라인 값을 보려면
-# piper_real.launch.py의 eih_debug_view:=true(vision_node가 직접 그림)를 쓸 것.
-#
-# ★ 토픽이 /vision/eih_marker_debug_image인 이유: vision_node도 디버그 뷰를
-#   /vision/eih_debug_image로 발행한다. 같은 이름을 쓰면 두 발행자가 한 토픽에
-#   섞여 뷰어에 두 검출 결과가 번갈아 뜬다.
-#
-# rqt_image_view로 /vision/eih_marker_debug_image 구독해서 볼 것.
-# 실제 파이프라인(vision_node.py)과 완전히 독립적으로 자체 검출해서 그리기만 한다 — 핵심 로직에 영향 없음.
 
 _LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
-# ID별 실제 한 변 길이[m] — step22_common.py 상수와 맞춰둔 것. 모르는 ID는 fallback 사용.
+
 MARKER_SIZE_BY_ID = {0: 0.035, 1: 0.035, 2: 0.035, 3: 0.035,
                       4: 0.020, 5: 0.10, 6: 0.020, 7: 0.04}
 FALLBACK_MARKER_SIZE = 0.020
@@ -37,21 +27,21 @@ FALLBACK_MARKER_SIZE = 0.020
 _HAS_ARUCO_DETECTOR = hasattr(cv2.aruco, "ArucoDetector")
 
 
-def _make_detector():
+def _make_detector():  # ArUco 검출기 생성(코너 정밀화 없음 — 디버그 전용)
     d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     if not _HAS_ARUCO_DETECTOR:
         return d, cv2.aruco.DetectorParameters_create()
     return cv2.aruco.ArucoDetector(d, cv2.aruco.DetectorParameters())
 
 
-def _detect_markers(gray, det):
+def _detect_markers(gray, det):  # 흑백 영상에서 마커 검출. 신/구 OpenCV API 차이 흡수
     if _HAS_ARUCO_DETECTOR:
         return det.detectMarkers(gray)
     d, pr = det
     return cv2.aruco.detectMarkers(gray, d, parameters=pr)
 
 
-def _rvec_to_rpy_deg(rvec):
+def _rvec_to_rpy_deg(rvec):  # 회전벡터 → (roll,pitch,yaw)[deg] — 화면에 찍어보기 위한 변환
     R, _ = cv2.Rodrigues(rvec)
     pitch = -math.asin(np.clip(R[2, 0], -1.0, 1.0))
     roll = math.atan2(R[2, 1], R[2, 2])
@@ -59,13 +49,13 @@ def _rvec_to_rpy_deg(rvec):
     return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
 
 
-def _reproj_error(corners, obj_pts, rvec, tvec, K, dist):
+def _reproj_error(corners, obj_pts, rvec, tvec, K, dist):  # 재투영 오차[px] — 포즈가 얼마나 맞는지 보는 지표
     proj, _ = cv2.projectPoints(obj_pts, rvec, tvec, K, dist)
     return float(np.linalg.norm(proj.reshape(-1, 2) - corners.reshape(-1, 2), axis=1).mean())
 
 
-class EihMarkerDebugNode(Node):
-    def __init__(self):
+class EihMarkerDebugNode(Node):  # 손목캠 마커 확인 전용 노드 — 제어에는 관여하지 않는다
+    def __init__(self):  # 검출기·토픽 등록. marker_size_m>0이면 모든 ID에 그 크기 강제
         super().__init__("eih_marker_debug_node")
         self.det = _make_detector()
         self.K = None
@@ -77,10 +67,10 @@ class EihMarkerDebugNode(Node):
         self.pub_debug = self.create_publisher(Image, "/vision/eih_marker_debug_image", 5)
         self.get_logger().info("eih_marker_debug_node 초기화 완료 — rqt_image_view로 /vision/eih_marker_debug_image 볼 것")
 
-    def _on_info(self, msg: CameraInfo):
+    def _on_info(self, msg: CameraInfo):  # 카메라 내부파라미터 K 수신
         self.K = np.array(msg.k, float).reshape(3, 3)
 
-    def _on_image(self, msg: Image):
+    def _on_image(self, msg: Image):  # 매 프레임: 모든 마커를 풀어 ID·거리·rpy·rep를 화면에 그린다
         if self.K is None:
             return
         rgba = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 4)
@@ -122,7 +112,7 @@ class EihMarkerDebugNode(Node):
         self.pub_debug.publish(out)
 
 
-def main():
+def main():  # 노드 기동 진입점
     rclpy.init()
     node = EihMarkerDebugNode()
     try:
@@ -131,8 +121,6 @@ def main():
         pass
     finally:
         node.destroy_node()
-        # launch가 SIGINT를 보내면 rclpy 시그널 핸들러가 이미 컨텍스트를 내려서
-        # 여기서 또 부르면 RCLError를 뱉는다(동작엔 영향 없지만 매번 traceback).
         if rclpy.ok():
             rclpy.shutdown()
 

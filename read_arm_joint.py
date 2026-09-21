@@ -25,7 +25,7 @@ from sensor_msgs.msg import JointState
 from step22_common import PIPER_JOINT_NAMES
 
 
-def main():
+def main():  # /joint_states를 받아 현재 관절각을 도 단위로 찍는다
     watch = "-w" in sys.argv[1:] or "--watch" in sys.argv[1:]
 
     rclpy.init()
@@ -41,7 +41,7 @@ def main():
         print("  ★ /joint_states 수신 없음 — piper_driver_node가 떠 있는지 확인할 것")
         node.destroy_node(); rclpy.shutdown(); sys.exit(2)
 
-    def show():
+    def show():  # 최신 수신값 한 줄 출력 — 런치 인자에 그대로 붙여넣을 수 있는 형태
         m = latest["msg"]
         try:
             deg = [math.degrees(m.position[m.name.index(n)]) for n in PIPER_JOINT_NAMES]

@@ -37,8 +37,8 @@ GRIP_TIMEOUT        = 150
 # ── 조정 파라미터 끝 ─────────────────────────────────────────────────────────
 
 
-class PiperGripperNode(Node):
-    def __init__(self):
+class PiperGripperNode(Node):  # 그리퍼 힘제어 — α-SMC로 접촉력을 목표값에 맞춰 닫는다
+    def __init__(self):  # 상태 변수 초기화 + 토픽 등록. 기동 3초 뒤 한 번 열어둔다
         super().__init__("piper_gripper_node")
 
         self.active = False
@@ -70,13 +70,13 @@ class PiperGripperNode(Node):
         self._open_timer = self.create_timer(3.0, self._open_on_startup)
         self.get_logger().info("piper_gripper_node 초기화 완료 — /gripper/cmd 대기")
 
-    def _open_on_startup(self):
+    def _open_on_startup(self):  # 기동 1회 오픈 — 이전 파지에서 닫힌 채 시작하는 것 방지
         self._open_timer.cancel()
         self.grip_alpha = 0.0
         self._publish_target(0.0)
         self.get_logger().info("기동 시 그리퍼 오픈")
 
-    def _on_feedback(self, msg: Float32MultiArray):
+    def _on_feedback(self, msg: Float32MultiArray):  # 개구부·접촉력 수신(부호 제거) → /gripper/grip_state로 재발행
         angle_mm, effort_nm, foc = msg.data
         # ★ 닫는 방향 저항은 음수로 들어온다(여는 쪽이 양수). 부호를 안 지우면
         # CONTACT_F_MIN 비교가 항상 실패해 "접촉 미감지"로 뜨면서 SMC가 계속 더
@@ -87,12 +87,12 @@ class PiperGripperNode(Node):
         self.pub_grip_state.publish(Float32MultiArray(data=pack_grip_state(
             self.stroke_mm, self.F_con, self.grip_contact, self.holding, self.active)))
 
-    def _publish_target(self, alpha):
+    def _publish_target(self, alpha):  # α(0=열림,1=닫힘) → 실제 개구부[mm] 명령으로 변환해 발행
         angle_mm = (1.0 - alpha) * GRIPPER_STROKE_MAX_M * 1000.0
         self.pub_target.publish(Float32MultiArray(
             data=[float(angle_mm), float(GRIPPER_EFFORT_LIMIT_NM)]))
 
-    def _on_gripper_cmd(self, msg: Bool):
+    def _on_gripper_cmd(self, msg: Bool):  # True=파지 시작(상태 리셋), False=릴리즈(즉시 오픈)
         if not msg.data:
             self.active = False
             self.holding = False
@@ -113,7 +113,7 @@ class PiperGripperNode(Node):
         self.holding = False
         self._publish_target(self.grip_alpha)
 
-    def _smc_alpha_command(self, F_contact):
+    def _smc_alpha_command(self, F_contact):  # α-SMC 1스텝 — 목표력과의 오차를 경계층으로 포화시켜 α를 갱신
         s_surf = SMC_F_TARGET - float(F_contact)
         sat = float(np.clip(s_surf / SMC_PHI, -1.0, 1.0))
         da = float(np.clip(SMC_K_A * sat, -SMC_A_RATE, SMC_A_RATE))
@@ -122,7 +122,7 @@ class PiperGripperNode(Node):
         self.grip_alpha = float(np.clip(self.grip_alpha + da, SMC_A_MIN, SMC_A_MAX))
         return self.grip_alpha
 
-    def _tick(self, _msg: Int32):
+    def _tick(self, _msg: Int32):  # 60Hz — SMC 갱신 → 접촉 판정 → 안정화/타임아웃이면 done 발행
         if not self.active: return
         self.arm_step += 1
 
@@ -171,7 +171,7 @@ class PiperGripperNode(Node):
             else:
                 self.active = False
 
-    def _publish_status(self):
+    def _publish_status(self):  # 2초마다 α·개구부·접촉력을 /gripper/status로 발행(진단용)
         self.pub_status.publish(String(
             data=f"alpha={self.grip_alpha:.3f} stroke="
                  f"{self.stroke_mm if self.stroke_mm is not None else -1:.1f}mm F_contact="
@@ -179,7 +179,7 @@ class PiperGripperNode(Node):
                  f"contact={self.grip_contact} active={self.active}"))
 
 
-def main():
+def main():  # 노드 기동 진입점
     rclpy.init()
     node = PiperGripperNode()
     try:

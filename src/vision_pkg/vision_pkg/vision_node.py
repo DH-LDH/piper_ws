@@ -52,7 +52,7 @@ _LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 _HAS_ARUCO_DETECTOR = hasattr(cv2.aruco, "ArucoDetector")
 
 
-def _make_detector(corner_refine=CORNER_REFINE):
+def _make_detector(corner_refine=CORNER_REFINE):  # ArUco 검출기 생성 — 코너 정밀화 on/off, 구버전 OpenCV 대응
     d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     if not _HAS_ARUCO_DETECTOR:
         return d, cv2.aruco.DetectorParameters_create()  # OpenCV<4.7 구API
@@ -69,20 +69,20 @@ def _make_detector(corner_refine=CORNER_REFINE):
     return cv2.aruco.ArucoDetector(d, pr)
 
 
-def _detect_markers(gray, det):
+def _detect_markers(gray, det):  # 흑백 영상 → (코너, ID, 기각후보). 신/구 API 차이 흡수
     if _HAS_ARUCO_DETECTOR:
         return det.detectMarkers(gray)
     d, pr = det
     return cv2.aruco.detectMarkers(gray, d, parameters=pr)
 
 
-def _img_to_gray(msg: Image):
+def _img_to_gray(msg: Image):  # ROS Image(RGBA) → 흑백 배열. 검출은 흑백만 쓴다
     arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 4)
     rgb = arr[:, :, :3]
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
 
 
-def _tf_to_Rt(tf):
+def _tf_to_Rt(tf):  # TF 메시지 → (회전행렬 R, 위치 t). 카메라→몸체 좌표변환에 쓴다
     q = tf.transform.rotation
     t = tf.transform.translation
     R = _quat_to_R((q.w, q.x, q.y, q.z))
@@ -90,7 +90,7 @@ def _tf_to_Rt(tf):
 
 
 class VisionNode(Node):
-    def __init__(self):
+    def __init__(self):  # 파라미터·토픽·타이머 등록만. 실제 계산은 _on_eih_image가 한다
         super().__init__("vision_node")
         self.det = _make_detector(self.declare_parameter("corner_refine", CORNER_REFINE).value)
         self.dist = np.zeros(5)
@@ -161,16 +161,16 @@ class VisionNode(Node):
         self.get_logger().info("vision_node 초기화 완료 — camera_info 대기 중")
 
 
-    def _on_eih_info(self, msg: CameraInfo):
+    def _on_eih_info(self, msg: CameraInfo):  # 카메라 내부파라미터 K 수신 — 있어야 solvePnP를 푼다
         self.eih_K = np.array(msg.k, float).reshape(3, 3)
         self.get_logger().info(f"끝단 카메라 내부파라미터 수신 K={self.eih_K[0,0]:.1f}")
 
-    def _publish_status(self):
+    def _publish_status(self):  # 2초마다 검출/기각 누적수를 /vision/status로 발행(진단용)
         self.pub_status.publish(String(
             data=f"eih_hit={self.eih_hit} rej_rep={self.eih_rej_rep} "
                  f"rep_max={self.eih_rep_max:.2f}px"))
 
-    def _solve_top_facing(self, corners, pts=TOP_PTS):
+    def _solve_top_facing(self, corners, pts=TOP_PTS):  # 마커 코너 → 카메라좌표 위치. 두 해 중 위를 보는 쪽 선택
         """마커 코너 → 위를 보는 면 기준 카메라좌표 위치. 반환: (t, rvec, rep_err) 또는 None
         (rvec/rep는 디버그 뷰 전용 — 포즈 계산 자체는 t만 쓴다)."""
         try:
@@ -189,7 +189,7 @@ class VisionNode(Node):
                 best_rv = rv; best_rep = float(reps[kk]) if kk < len(reps) else 0.0
         return best, best_rv, best_rep
 
-    def _marker_body_yaw(self, rvec, R_bc):
+    def _marker_body_yaw(self, rvec, R_bc):  # 마커가 몸체좌표에서 향한 방향[rad] — place 오프셋에 쓴다
         """마커 자신의 +Y축을 body XY 평면에 투영한 방향[rad].
         eih_cam이 OpenCV 관례(x-right, y-down, z-fwd)로 정의돼 있어 solvePnP 결과를
         그대로 body로 옮기면 된다 — R_body = R_bc @ R_cam."""
@@ -198,7 +198,7 @@ class VisionNode(Node):
         ay = R_bm[:, 1]
         return math.atan2(float(ay[1]), float(ay[0]))
 
-    def _eih_reproj_ok(self, corners, rep, tag):
+    def _eih_reproj_ok(self, corners, rep, tag):  # 재투영 오차 게이트 — 못 통과하면 미검출 처리
         """손목캠 재투영 게이트 — (통과여부, 마커 한 변 픽셀길이, 상대오차).
         px 절대값과 마커 크기 대비 비율을 둘 다 봐야 원거리/근접이 같은 기준이 된다."""
         c = np.asarray(corners, float).reshape(4, 2)
@@ -215,14 +215,14 @@ class VisionNode(Node):
         return ok, side_px, rel
 
     # ── 손목캠 디버그 뷰(eih_debug_view=true일 때만) ────────────────────────
-    def _dbg_frame(self, msg: Image):
+    def _dbg_frame(self, msg: Image):  # 디버그 뷰용 프레임 복사 — 뷰가 꺼져 있으면 None
         """디버그 뷰가 꺼져 있으면 None — 켜져 있을 때만 프레임을 BGR로 복사한다."""
         if self.pub_eih_debug is None:
             return None
         rgba = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 4)
         return cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
 
-    def _dbg_publish(self, dbg, msg: Image, lines=(), color=(0, 255, 0)):
+    def _dbg_publish(self, dbg, msg: Image, lines=(), color=(0, 255, 0)):  # 디버그 영상에 텍스트 얹어 발행
         if dbg is None:
             return
         for i, line in enumerate(lines):
@@ -237,7 +237,7 @@ class VisionNode(Node):
         self.pub_eih_debug.publish(out)
 
     # ── 끝단 카메라: 윗면 마커(ID0) → 몸체좌표 위치 ─────────────────────────
-    def _on_eih_image(self, msg: Image):
+    def _on_eih_image(self, msg: Image):  # 핵심 경로 — 검출→포즈→게이트→몸체좌표 발행
         if self.eih_K is None: return
         dbg = self._dbg_frame(msg)
         try:
@@ -316,7 +316,7 @@ class VisionNode(Node):
                 f"body=({p_body[0]:+.3f},{p_body[1]:+.3f},{p_body[2]:+.3f})m"])
 
 
-def main():
+def main():  # 노드 기동 진입점 — setup.py의 console_scripts가 부른다
     rclpy.init()
     node = VisionNode()
     try:
@@ -325,8 +325,6 @@ def main():
         pass
     finally:
         node.destroy_node()
-        # launch가 SIGINT를 보내면 rclpy 시그널 핸들러가 이미 컨텍스트를 내려서
-        # 여기서 또 부르면 RCLError를 뱉는다(동작엔 영향 없지만 매번 traceback).
         if rclpy.ok():
             rclpy.shutdown()
 

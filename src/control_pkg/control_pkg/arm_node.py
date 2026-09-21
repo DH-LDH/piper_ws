@@ -94,8 +94,8 @@ MAX_GRASP_RETRY = 2      # 헛집음 시 재상승→재진입 최대 횟수(0�
 # ── 조정 파라미터 끝 ─────────────────────────────────────────────────────────
 
 
-class ArmNode(Node):
-    def __init__(self):
+class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place 전체 시퀀스를 지휘
+    def __init__(self):  # 파라미터·토픽 등록과 상태 변수 초기화. 실제 진행은 _tick이 한다
         super().__init__("arm_node")
 
         self.arm_phase = "wait"
@@ -311,7 +311,7 @@ class ArmNode(Node):
             f"z_below_anchor_max={self.grasp_z_below_anchor_max*1000:.0f}mm)")
 
     # ── 구독 콜백 ────────────────────────────────────────────────────────────
-    def _on_lock(self, msg: Bool):
+    def _on_lock(self, msg: Bool):  # AMR 정위치 신호 → wait에서 hover로 전환, 픽 시퀀스 개시
         if not msg.data or self.arm_phase != "wait": return
         print("      → 락 수신, 팔 파지 시퀀스 개시\n")
         self.arm_phase = "hover"; self.arm_step = 0
@@ -319,17 +319,17 @@ class ArmNode(Node):
             self.ml_start = self.ee_pose.copy()
         self.ml_target = self._obj_center_body_rel() - HOVER_APPROACH_DIR * (HOVER_STANDOFF + self.ee_grip_offset)
 
-    def _obj_center_body_rel(self):
+    def _obj_center_body_rel(self):  # 물체 대략 위치(마커 보기 전 초기 조준점). launch 파라미터로 준다
         """물체 대략 위치(body_link 기준) — obj_expected_*_body 파라미터로 설정."""
         return np.array([self.obj_expected_x_body, self.obj_expected_y_body,
                           self.obj_expected_z_body])
 
-    def _on_place_lock(self, msg: Bool):
+    def _on_place_lock(self, msg: Bool):  # place 개시 신호 → place_wait에서 place_ready로 전환
         if not msg.data or self.arm_phase != "place_wait": return
         print("      → place_lock 수신, 마커 기반 플레이스 시퀀스 개시(place_ready)\n")
         self.arm_phase = "place_ready"; self.arm_step = 0
 
-    def _on_place_marker(self, msg: Float32MultiArray):
+    def _on_place_marker(self, msg: Float32MultiArray):  # 손목캠이 본 place 마커 수신 — place_detect/descend가 실시간 보정에 쓴다
         """손목캠이 본 place 마커(body_link 상대) — place_detect/place_descend가
         이걸로 실시간 보정한다(_on_eih의 place 버전, _place_point() 참고)."""
         x, y, z, valid, yaw = unpack_eih_marker(msg.data)
@@ -337,21 +337,21 @@ class ArmNode(Node):
         if valid:
             self.place_top_yaw = float(yaw)
 
-    def _on_joint_states(self, msg: JointState):
+    def _on_joint_states(self, msg: JointState):  # 실제 관절각 수신 — MOVE J 단계의 도달 판정 입력
         try:
             idx = [msg.name.index(n) for n in PIPER_JOINT_NAMES]
         except ValueError:
             return  
         self.joint_now = np.array([msg.position[i] for i in idx], float)
 
-    def _joint_err_deg(self, q_target):
+    def _joint_err_deg(self, q_target):  # 현재 관절각과 목표의 최대 오차[deg]. 미수신이면 None
         """현재 관절각과 목표의 최대 오차[deg]. /joint_states 미수신이면 None."""
         if self.joint_now is None:
             return None
         return float(np.max(np.abs(np.degrees(
             self.joint_now - np.asarray(q_target, float)))))
 
-    def _joint_settled(self, label, q_target, max_steps):
+    def _joint_settled(self, label, q_target, max_steps):  # 관절 이동 완료 판정 — 기본은 시간 기준, tol>0이면 실제 오차 기준
         """관절 이동 완료 판정(True=진행해도 됨).
         place_joint_arrive_tol_deg가 0 이하면 판정은 종전처럼 "시간"으로 하고 실제
         관절 오차는 로그로만 남긴다 — 정상 오차가 얼마인지 모르는 채로 좁게 잡으면
@@ -377,13 +377,13 @@ class ArmNode(Node):
             return True
         return False
 
-    def _on_ee_pose(self, msg: Point):
+    def _on_ee_pose(self, msg: Point):  # 팔 끝 실제 위치 수신 — 직교 단계의 물리 도달 판정 입력
         self.ee_pose = np.array([msg.x, msg.y, msg.z], float)
 
-    def _on_gripper_done(self, msg: Bool):
+    def _on_gripper_done(self, msg: Bool):  # 그리퍼가 닫기를 끝냈다는 1회성 신호(접촉 여부 포함)
         self.grip_contact_result = bool(msg.data)
 
-    def _on_grip_state(self, msg: Float32MultiArray):
+    def _on_grip_state(self, msg: Float32MultiArray):  # 그리퍼 상시 상태 수신 — 파지 판정의 유일한 입력. 최소 개구부도 여기서 추적
         """그리퍼 상시 상태(개구부/접촉) — 그리퍼 기반 파지 판정의 유일한 입력."""
         stroke, effort, contact, holding, _active = unpack_grip_state(msg.data)
         self.grip_stroke = stroke
@@ -401,7 +401,7 @@ class ArmNode(Node):
         if self.arm_phase == "verify":
             self.grip_v_n += 1
 
-    def _grasp_point(self, mk):
+    def _grasp_point(self, mk):  # 마커 위치 → 파지 목표점. 깊이는 월드 -Z, 그리퍼 길이는 접근축으로 따로 뺀다
         """윗면 마커 위치(mk, 몸체좌표) → link6 IK 목표(파지점). 깊이 보정(grasp_depth_extra)은
         월드 -Z로, 접근축(GRASP_APPROACH_DIR) 보정은 그리퍼 길이(self.ee_grip_offset)에만 걸어야
         한다 — 섞어서 한 번에 빼면 내려간 만큼 옆으로도 밀린다. detect/pre/grasp가 공유하는
@@ -410,11 +410,11 @@ class ArmNode(Node):
         obj_c = mk_w - np.array([0.0, 0.0, self.grasp_depth_extra])
         return obj_c - GRASP_APPROACH_DIR * self.ee_grip_offset
 
-    def _place_point(self, mk):
+    def _place_point(self, mk):  # place 마커 위치 → 놓는 목표점
         """place 마커 위치(mk, 몸체좌표) → link6 IK 목표(놓는점)."""
         return self._place_point_marker_inset(mk)
 
-    def _place_inset_dir(self, mk_w):
+    def _place_inset_dir(self, mk_w):  # 마커에서 어느 방향으로 비킬지 — 기본은 마커 자신의 -Y 방향
         """마커 중심에서 놓는점까지 "어느 방향으로" 비킬지 — body XY 단위벡터."""
         if self.place_inset_mode == "marker_y":
             if self.place_top_yaw is None:
@@ -430,7 +430,7 @@ class ArmNode(Node):
         n = float(np.linalg.norm(v))
         return -v / n if n > 1e-6 else np.zeros(2)
 
-    def _place_point_marker_inset(self, mk):
+    def _place_point_marker_inset(self, mk):  # 마커에서 옆으로 비키고 위로 띄운 놓는점. 마커를 덮지 않게 한다
         """[실물] 마커 중심에서 팔 베이스 쪽으로 place_inset만큼 당긴 지점에 놓는다.
         물체를 마커 위에 그대로 올리면 마커가 덮여 재검출이 끊기고, 쥔 물체가 시야도
         가린다. 높이는 "물체 바닥이 선반면보다 place_release_gap 위"가 되게 잡는다 —
@@ -444,11 +444,11 @@ class ArmNode(Node):
                         + (self.obj_height_m - self.grasp_depth_extra)])
         return tip - self.place_approach_dir * self.ee_grip_offset
 
-    def _place_point_from_guess(self):
+    def _place_point_from_guess(self):  # 마커를 끝내 못 봤을 때 쓰는 사전 추정 놓는점
         """마커를 끝내 못 봤을 때 쓰는 사전 추정 놓는점."""
         return self._place_point(self.ml_place_center)
 
-    def _wait_physical_arrive(self, wait_attr, tol, label):
+    def _wait_physical_arrive(self, wait_attr, tol, label):  # 팔이 실제로 도착할 때까지 대기 — _move_l의 done은 시간 기준이라 못 믿는다
         """_move_l의 시간상 done 이후 실제(ee_pose) 도달을 기다린다. True면 진행해도 됨.
         5% 속도에서는 스트림이 끝난 뒤에도 팔이 한참 더 가므로 이 확인이 없으면
         다음 단계가 "아직 안 간 상태"에서 시작한다."""
@@ -467,7 +467,7 @@ class ArmNode(Node):
         return True
 
 # 그립 판정 로직
-    def _verify_by_gripper(self):
+    def _verify_by_gripper(self):  # 개구부+접촉으로 파지 성공 판정(None=보류). 물체를 물면 개구부가 물체 폭에서 멈춘다
         """그리퍼 개구부+접촉만으로 파지 성공 여부를 판정한다(None=판정 보류).
         차체캠이 없는 실물 v1의 기본 경로 — 카메라 시야/오클루전에 의존하지 않는다."""
         w = self.obj_width_m * 1000.0
@@ -521,7 +521,7 @@ class ArmNode(Node):
                   f"실측으로 맞출 것(빈손으로 닫았을 때의 보고값)")
         return True
 
-    def _verify(self):
+    def _verify(self):  # verify_mode에 따라 판정 주체 선택 — 현재는 그리퍼 방식만 산다
         """verify_mode에 따라 판정 주체를 고른다(None=판정 보류)."""
         # [차체캠] 
         # if self.verify_mode == "chassis":
@@ -533,7 +533,7 @@ class ArmNode(Node):
         #           f"{'보류' if c is None else c}  일치={'-' if c is None else (c == v)}")
         return v
 
-    def _on_pick_verdict(self, ok: bool):
+    def _on_pick_verdict(self, ok: bool):  # 판정 결과 처리 — 성공이면 place 대기로, 실패면 재상승 후 재시도
         """판정 결과 처리 — 성공이면 종료, 실패면 재시도 또는 포기."""
         self.pub_pick_event.publish(Bool(data=bool(ok)))
         if ok:
@@ -556,7 +556,7 @@ class ArmNode(Node):
         self.hover_wait_n = 0
         self.arm_phase = "hover"; self.arm_step = 0
 
-    def _on_eih(self, msg: Float32MultiArray):
+    def _on_eih(self, msg: Float32MultiArray):  # 손목캠 픽 마커 수신 — 매 프레임 파지점을 다시 계산해 추종한다
         x, y, z, valid, _yaw = unpack_eih_marker(msg.data)
         self.eih_new = (np.array([x, y, z], float) if valid else None)
 
@@ -668,7 +668,7 @@ class ArmNode(Node):
                 else:
                     self.gr_eih_rej_n += 1
 
-    def _eih_accept(self, g2, max_xy):
+    def _eih_accept(self, g2, max_xy):  # 재검출 파지점을 받아들일지 판정 — XY는 관대, z는 좁게
         """재검출 파지점 g2를 수용할지 — (수용여부, 사유). anchor 대비 축별로 본다.
         XY는 관대하게(물체 이동 추종), z는 좁게(테이블 충돌 방어)."""
         anc = self.ml_grasp_anchor
@@ -682,12 +682,12 @@ class ArmNode(Node):
             return False, f"z {dz*1000:.0f}mm (떨어진 물체)"
         return True, ""
 
-    def _on_step_confirm(self, msg: Bool):
+    def _on_step_confirm(self, msg: Bool):  # step_confirm 모드에서 다음 단계 진행 승인 수신
         if msg.data:
             self.step_ready = True
 
     # ── 60Hz 틱 ─────────────────────────────────────────────────────────────
-    def _tick(self, _msg: Int32):
+    def _tick(self, _msg: Int32):  # 60Hz 상태머신 본체 — phase별 동작과 전이를 전부 여기서 처리
         # [차체캠] self.chassis_age += 1
         ap = self.arm_phase
 
@@ -1059,7 +1059,7 @@ class ArmNode(Node):
 
         self.pub_status.publish(String(data=f"phase={self.arm_phase} arm_step={self.arm_step}"))
 
-    def _move_l(self, speed):
+    def _move_l(self, speed):  # 목표로 매틱 조금씩 다가가는 속도제한 직선 추종. 완료 여부 반환
         """목표(ml_target)로 매틱 speed만큼씩 다가가는 속도제한 추종. (완료 여부) 반환.
         매틱 target 위치를 publish — plant가 IK를 풀어 실제로 적용한다. (구 방식은
         total=norm(target-start)의 경과시간 비율이라, target이 계속 갱신되는
@@ -1083,11 +1083,11 @@ class ArmNode(Node):
         self.pub_cart_target.publish(Point(x=float(pos[0]), y=float(pos[1]), z=float(pos[2])))
         return done
 
-    def _publish_status(self):
+    def _publish_status(self):  # 2초마다 현재 phase를 로그로 남긴다
         self.get_logger().info(f"phase={self.arm_phase}")
 
 
-def main():
+def main():  # 노드 기동 진입점
     rclpy.init()
     node = ArmNode()
     try:

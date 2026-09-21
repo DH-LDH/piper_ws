@@ -24,7 +24,7 @@ from rclpy.qos import QoSProfile, DurabilityPolicy
 from std_msgs.msg import Float32MultiArray
 
 
-def main():
+def main():  # 인자로 받은 관절각을 /arm/joint_hold_target으로 발행 — driver가 MOVE J로 적용
     if len(sys.argv) != 7:
         print(f"사용법: {sys.argv[0]} j1 j2 j3 j4 j5 j6   (도 단위, joint1~6)")
         sys.exit(1)

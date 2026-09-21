@@ -27,8 +27,8 @@ from step22_common import ARM_BASE_YAW_DEG
 STARTUP_LOCK_DELAY_SEC = 3.0   # 다른 노드들이 다 올라올 시간을 준다
 
 
-class PiperFakeAmrNode(Node):
-    def __init__(self):
+class PiperFakeAmrNode(Node):  # AMR 없는 구성의 스텁 — 개시 신호와 body_link TF만 대신 쏜다
+    def __init__(self):  # 토픽 등록 + body_link→world TF 1회 발행(팔 90° 장착 회전 포함)
         super().__init__("piper_fake_amr_node")
         self.pub_lock = self.create_publisher(Bool, "/amr/lock", 1)
         self.pub_place_lock = self.create_publisher(Bool, "/amr/place_lock", 1)
@@ -49,12 +49,12 @@ class PiperFakeAmrNode(Node):
 
         self.get_logger().info("piper_fake_amr_node 초기화 완료 — AMR 없이 lock/place_lock/body_link TF 대신 발행")
 
-    def _send_initial_lock(self):
+    def _send_initial_lock(self):  # 기동 3초 뒤 /amr/lock=True 1회 — 픽 시퀀스 개시 신호
         self.pub_lock.publish(Bool(data=True))
         self.get_logger().info("/amr/lock=True 발행 — 픽 시퀀스 개시 신호(가짜 AMR)")
         self._startup_timer.cancel()  # 1회만
 
-    def _on_arm_status(self, msg: String):
+    def _on_arm_status(self, msg: String):  # phase가 place_wait가 되면 place_lock 1회 — place 개시 신호
         phase = (msg.data.split(" ")[0].split("=")[-1]
                  if "phase=" in msg.data else msg.data)
         if phase == "place_wait" and not self._sent_place_lock:
@@ -63,7 +63,7 @@ class PiperFakeAmrNode(Node):
             self.get_logger().info("/amr/place_lock=True 발행 — place 시퀀스 개시 신호(가짜 AMR)")
 
 
-def main():
+def main():  # 노드 기동 진입점
     rclpy.init()
     node = PiperFakeAmrNode()
     try:

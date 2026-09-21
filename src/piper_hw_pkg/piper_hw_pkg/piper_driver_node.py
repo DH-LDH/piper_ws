@@ -53,7 +53,7 @@ FAULT_CODES = {1, 2, 3, 4, 7}
 # ── 조정 파라미터 끝 ─────────────────────────────────────────────────────────
 
 
-def _body_to_native_xy(x_body, y_body):
+def _body_to_native_xy(x_body, y_body):  # body_link XY → EndPoseCtrl 고유좌표. 팔이 90° 돌아 장착돼 회전이 필요
     """arm_node가 body_link 기준으로 계산한 XY를 EndPoseCtrl 고유좌표로 변환.
     팔이 베이스 기준 ARM_BASE_YAW_DEG만큼 돌아 장착돼 있어 이 회전이 필요하다."""
     a = math.radians(-ARM_BASE_YAW_DEG)
@@ -61,17 +61,17 @@ def _body_to_native_xy(x_body, y_body):
             x_body * math.sin(a) + y_body * math.cos(a))
 
 
-def _native_to_body_xy(x_native, y_native):
+def _native_to_body_xy(x_native, y_native):  # 위의 역변환 — 팔 피드백을 body_link로 되돌린다
     """위 변환의 역 — EndPoseCtrl 피드백(native)을 body_link로 바꿔 /arm/ee_pose_body에 싣는다."""
     a = math.radians(ARM_BASE_YAW_DEG)
     return (x_native * math.cos(a) - y_native * math.sin(a),
             x_native * math.sin(a) + y_native * math.cos(a))
 
 
-def _build_down_quats(place_pitch_deg=PLACE_PITCH_DEG):
+def _build_down_quats(place_pitch_deg=PLACE_PITCH_DEG):  # grasp/hover/place 3단계의 그리퍼 지향 쿼터니언 생성
     """grasp / hover / place 각 단계의 그리퍼 지향 쿼터니언을 만든다.
     셋 다 "아래를 본다"가 기본이고 단계별 pitch와 공통 롤만 다르다."""
-    def _one(pitch_deg):
+    def _one(pitch_deg):  # pitch 하나에 대한 쿼터니언 — 아래보기 + 단계 pitch + 공통 롤
         q = quat_from_two_vec(TOOL_AXIS_LOCAL, GRIPPER_DOWN)
         if abs(pitch_deg) > 1e-6:
             q = _quat_mul(_quat_axis_angle(np.array([1.0, 0.0, 0.0]), pitch_deg), q)
@@ -83,7 +83,7 @@ def _build_down_quats(place_pitch_deg=PLACE_PITCH_DEG):
     return _one(GRASP_PITCH_DEG), _one(HOVER_PITCH_DEG), _one(place_pitch_deg)
 
 
-def _quat_to_rpy_deg(q):
+def _quat_to_rpy_deg(q):  # 쿼터니언 → (roll,pitch,yaw)[deg]. EndPoseCtrl이 오일러각을 받는다
     """쿼터니언(w,x,y,z) → (roll,pitch,yaw)[deg], R=Rz(yaw)@Ry(pitch)@Rx(roll) 가정.
     해가 180도 대칭으로 둘 나오지만 같은 자세를 가리키므로 어느 쪽이든 무방하다."""
     R = _quat_to_R(q)
@@ -93,8 +93,8 @@ def _quat_to_rpy_deg(q):
     return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
 
 
-class PiperDriverNode(Node):
-    def __init__(self):
+class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령으로, 팔 피드백을 ROS 토픽으로
+    def __init__(self):  # CAN 연결·팔 활성화·토픽 등록. really_enable=false면 명령은 안 보낸다
         super().__init__("piper_driver_node")
 
         self.declare_parameter("can_name", CAN_NAME_DEFAULT)
@@ -162,7 +162,7 @@ class PiperDriverNode(Node):
         self.get_logger().info(f"piper_driver_node 초기화 완료 (can={can_name}, really_enable={self.really_enable})")
 
     # ── 구독 콜백 ────────────────────────────────────────────────────────────
-    def _on_arm_status(self, msg: String):
+    def _on_arm_status(self, msg: String):  # arm_node의 phase 수신 — 바뀌면 명령 캐시를 비운다(중복생략 오작동 방지)
         phase = (msg.data.split(" ")[0].split("=")[-1]
                   if "phase=" in msg.data else msg.data)
         if phase != self.arm_phase:
@@ -170,20 +170,20 @@ class PiperDriverNode(Node):
             self._last_jointctrl = None
         self.arm_phase = phase
 
-    def _on_cart_target(self, msg: Point):
+    def _on_cart_target(self, msg: Point):  # 직교 목표점 수신 — CARTESIAN_PHASES에서 MOVE L로 나간다
         self.cartesian_target = np.array([msg.x, msg.y, msg.z], float)
 
-    def _on_joint_hold(self, msg: Float32MultiArray):
+    def _on_joint_hold(self, msg: Float32MultiArray):  # 관절 목표 수신 — JOINT_HOLD_PHASES에서 MOVE J로 나간다
         self.joint_hold_target = unpack_joint_hold_target(msg.data)
 
-    def _on_gripper_target(self, msg: Float32MultiArray):
+    def _on_gripper_target(self, msg: Float32MultiArray):  # 그리퍼 목표 수신 → GripperCtrl. fault 중엔 무시
         if self.piper is None or not self.really_enable or self._fault_latched:
             return
         angle_mm, effort_nm = float(msg.data[0]), float(msg.data[1])
         self.piper.GripperCtrl(round(angle_mm * 1000), round(effort_nm * 1000), 0x01, 0)
 
     # ── 60Hz 틱 ─────────────────────────────────────────────────────────────
-    def _tick(self):
+    def _tick(self):  # 60Hz 심장박동 — 피드백 발행 → fault 확인 → phase별 모션 명령
         self._tick_n += 1
         self.pub_tick.publish(Int32(data=self._tick_n))
         if self.piper is None:
@@ -227,18 +227,18 @@ class PiperDriverNode(Node):
             else:
                 self._cmd_skipped += 1
 
-    def _publish_cmd_stats(self):
+    def _publish_cmd_stats(self):  # 5초마다 전송/중복생략 횟수 로그 — 명령이 실제로 나가는지 확인용
         self.get_logger().info(
             f"모션명령 전송 {self._cmd_sent}회 / 중복생략 {self._cmd_skipped}회 "
             f"(phase={self.arm_phase})")
 
-    def _send_move_mode(self, move_mode):
+    def _send_move_mode(self, move_mode):  # MOVE J/L 모드 전환. 같은 모드면 CAN 트래픽을 아낀다
         if self._last_move_mode == move_mode:
             return
         self.piper.MotionCtrl_2(0x01, move_mode, self.move_spd, 0x00)
         self._last_move_mode = move_mode
 
-    def _publish_feedback(self):
+    def _publish_feedback(self):  # 팔의 엔드포즈·관절각·그리퍼 상태를 ROS 토픽으로 중계
         ep = self.piper.GetArmEndPoseMsgs().end_pose
         x_body, y_body = _native_to_body_xy(ep.X_axis / 1_000_000.0, ep.Y_axis / 1_000_000.0)
         self.pub_ee_pose.publish(Point(
@@ -258,11 +258,11 @@ class PiperDriverNode(Node):
             data=[gs.grippers_angle / 1000.0, gs.grippers_effort / 1000.0,
                   float(gs.status_code)]))
 
-    def destroy_node(self):
+    def destroy_node(self):  # 종료 시 DisableArm을 부르지 않는다 — 무동력 낙하 방지
         super().destroy_node()
 
 
-def main():
+def main():  # 노드 기동 진입점
     rclpy.init()
     node = PiperDriverNode()
     try:
