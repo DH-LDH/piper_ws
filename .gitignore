@@ -7,6 +7,5 @@ log/
 __pycache__/
 *.pyc
 
-# vendor mesh assets (ranger_base.dae alone is 105MB, over GitHub's 100MB file limit;
-# these are supplied by the Ranger Mini vendor SDK, not authored here)
-meshes/
+# piper_description/meshes(STL 13개, 10MB)는 추적한다 — 없으면 robot_state_publisher가 죽는다.
+# 105MB였던 ranger_base.dae는 Ranger 패키지와 함께 제거됐다(sim-final 태그에 보존).

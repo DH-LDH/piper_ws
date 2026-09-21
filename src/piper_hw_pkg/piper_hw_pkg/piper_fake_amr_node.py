@@ -15,16 +15,8 @@ from tf2_ros import StaticTransformBroadcaster
 
 from step22_common import ARM_BASE_YAW_DEG
 
-# 팔이 고정 베이스에 단독으로 설치된 구성이라 이동대차가 없다. 그런데 arm_node는
-# 시퀀스 개시 신호(/amr/lock, /amr/place_lock)를 기다리므로, "이미 정위치에 있다"는
-# 전제를 그대로 신호로 쏴주는 최소 스텁이 필요하다.
-#
-# body_link TF도 여기서 정적으로 쏜다 — 없으면 vision_node의 body_link→eih_cam 조회가
-# 매번 실패해 손목캠 마커 인식이 통째로 죽는다. 이때 ARM_BASE_YAW_DEG(90°) 회전을
-# 반드시 넣어야 한다. 팔이 베이스 기준 90도 돌아 장착돼 있어서, identity로 두면
-# EndPoseCtrl의 X가 body_link Y(전진방향)에 대응하는 관계가 깨져 X/Y가 뒤바뀐다.
 
-STARTUP_LOCK_DELAY_SEC = 3.0   # 다른 노드들이 다 올라올 시간을 준다
+STARTUP_LOCK_DELAY_SEC = 3.0   # 대기
 
 
 class PiperFakeAmrNode(Node):  # AMR 없는 구성의 스텁 — 개시 신호와 body_link TF만 대신 쏜다
@@ -41,8 +33,8 @@ class PiperFakeAmrNode(Node):  # AMR 없는 구성의 스텁 — 개시 신호�
         tf = TransformStamped()
         tf.header.stamp = self.get_clock().now().to_msg()
         tf.header.frame_id = "body_link"
-        tf.child_frame_id = "world"  # URDF 루트(world)를 body_link 밑에 붙임 — base_link에 부모 이중선언 방지
-        h = math.radians(ARM_BASE_YAW_DEG) / 2.0
+        tf.child_frame_id = "world"  # URDF 루트(world)를 body_link 밑에 붙임
+        h = math.radians(ARM_BASE_YAW_DEG) / 2.0  # 팔이 베이스 기준 90° 돌아 장착 — 빼면 X/Y가 뒤바뀐다
         tf.transform.rotation.z = math.sin(h)
         tf.transform.rotation.w = math.cos(h)
         self.tf_static.sendTransform(tf)
@@ -72,8 +64,6 @@ def main():  # 노드 기동 진입점
         pass
     finally:
         node.destroy_node()
-        # launch가 SIGINT를 보내면 rclpy 시그널 핸들러가 이미 컨텍스트를 내려서
-        # 여기서 또 부르면 RCLError를 뱉는다(동작엔 영향 없지만 매번 traceback).
         if rclpy.ok():
             rclpy.shutdown()
 
