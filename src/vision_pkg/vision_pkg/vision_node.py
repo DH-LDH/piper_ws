@@ -36,7 +36,7 @@ from step22_common import (
 # PLACE_PHI_ALPHA = 0.08    # 도킹 중 안정화 
 
 EIH_PRINT_EVERY = 30   # 손목캠 픽 마커 진단 출력 주기(약 2초)
-EIH_REPROJ_MAX_PX  = 30.0   #  절대 상한 
+EIH_REPROJ_MAX_PX  = 30.0   #  오차 절대 상한 
 EIH_REPROJ_MAX_REL = 0.20   #  rep / 마커 한 변 픽셀길이 — 스케일 불변 게이트(관측용 느슨값)
 
 # ArUco 코너 정밀화
@@ -53,7 +53,7 @@ _HAS_ARUCO_DETECTOR = hasattr(cv2.aruco, "ArucoDetector")
 
 
 def _make_detector(corner_refine=CORNER_REFINE):  # ArUco 검출기 생성 — 코너 정밀화 on/off, 구버전 OpenCV 대응
-    d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50) #4x4 아르코 마커 
     if not _HAS_ARUCO_DETECTOR:
         return d, cv2.aruco.DetectorParameters_create()  # OpenCV<4.7 구API
     pr = cv2.aruco.DetectorParameters()
@@ -201,9 +201,9 @@ class VisionNode(Node):
     def _eih_reproj_ok(self, corners, rep, tag):  # 재투영 오차 게이트 — 못 통과하면 미검출 처리
         """손목캠 재투영 게이트 — (통과여부, 마커 한 변 픽셀길이, 상대오차).
         px 절대값과 마커 크기 대비 비율을 둘 다 봐야 원거리/근접이 같은 기준이 된다."""
-        c = np.asarray(corners, float).reshape(4, 2)
-        side_px = float(np.mean([np.linalg.norm(c[(i+1) % 4] - c[i]) for i in range(4)]))
-        rel = rep / side_px if side_px > 1e-6 else 9.99
+        c = np.asarray(corners, float).reshape(4, 2) # 아르코 4개 코너 정리
+        side_px = float(np.mean([np.linalg.norm(c[(i+1) % 4] - c[i]) for i in range(4)])) # 화면 기준으로 얼마나 큰지 평균(가까우면 크고, 멀면 작다)
+        rel = rep / side_px if side_px > 1e-6 else 9.99 # 오차를 크기로 나누기 
         ok = (rep <= self.eih_reproj_max_px) and (rel <= self.eih_reproj_max_rel)
         if not ok:
             self.eih_rej_rep += 1
@@ -248,12 +248,12 @@ class VisionNode(Node):
             return
         gray = _img_to_gray(msg)
 
-        cs, ids, _ = _detect_markers(gray, self.det)
+        cs, ids, _ = _detect_markers(gray, self.det) # 화면의 모든 아르코 마커 검출 후 필요한 것만 detect
         id_list = ids.flatten().tolist() if ids is not None else []
         if dbg is not None and ids is not None:
             cv2.aruco.drawDetectedMarkers(dbg, cs, ids)
 
-        # place 지그 상판 마커 
+        # place 마커 
         _sol, _pc = None, None
         if self.place_marker_id in id_list:
             _pc = cs[id_list.index(self.place_marker_id)].reshape(4, 2)
@@ -283,7 +283,7 @@ class VisionNode(Node):
             self._dbg_publish(dbg, msg, [hdr, "solvePnP FAILED"], (0, 0, 255))
             return
         best, rvec, rep = sol
-
+        # pick 마커 
         gate_ok, side_px, rel = self._eih_reproj_ok(corners, rep, f"pick ID{self.pick_marker_id}")
         if not gate_ok:
             self.pub_eih.publish(Float32MultiArray(data=pack_eih_marker(0, 0, 0, False)))
@@ -292,7 +292,7 @@ class VisionNode(Node):
             return
         self.eih_rep_max = max(self.eih_rep_max, rep)
 
-        p_body = R_bc @ best + t_bc
+        p_body = R_bc @ best + t_bc # 좌표 변환 및 발행
         self.pub_eih.publish(Float32MultiArray(
             data=pack_eih_marker(p_body[0], p_body[1], p_body[2], True,
                                   self._marker_body_yaw(rvec, R_bc))))

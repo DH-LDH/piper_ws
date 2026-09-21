@@ -1,34 +1,24 @@
 import math
 import numpy as np
 
-# =============================================================================
-# 기하 상수 — 팔 접근 자세, 마커 치수, 좌표 규약
-#
-# 여기 값은 여러 노드가 공유하므로 한 곳에서만 정의한다. 실기에서 실제로 쓰는
-# 값 중 상당수는 launch 인자로 덮어쓰이며(ee_grip_offset, obj_expected_* 등),
-# 그때 이 파일의 값은 "런치 인자를 안 줬을 때의 기본값" 역할만 한다.
-# =============================================================================
+
 
 BODY_LINK_WORLD_Z = 0.277   # [m] base_link의 world Z — world 절대높이 비교 시 이만큼 빼야 함
                             #     실물은 body_link=팔 베이스라 launch에서 0.0으로 덮어쓴다
-OBJ_S = 0.05    # [m] 타겟 큐브 한 변 — 실물 타겟은 obj_width_m/obj_height_m 인자로 준다
+OBJ_S = 0.05    # [m] 타겟 큐브 한 변 
 
 KEEP_DIST = 0.42     # [m] 차체-타겟 거리. joint5 여유가 좁아 함부로 늘리면 IK 도달 불가
 
-# HOVER_PITCH_DEG / KEEP_DIST는 세트로만 유효하다 — joint5 특이점 회피, link6 하우징
-# 간섭 회피, IK 수렴이라는 3개 제약이 얽혀 있어 하나만 바꾸면 나머지가 깨진다.
+
 HOVER_PITCH_DEG = 0.0   # [deg] hover 자세의 팔 접근 pitch (0=완전수직)
 _hp = math.radians(HOVER_PITCH_DEG)
 HOVER_APPROACH_DIR = np.array([0.0, math.sin(_hp), -math.cos(_hp)])
 HOVER_STANDOFF = 0.138  # [m] hover 시 그리퍼 끝단-물체 "윗면" 거리 (= 0.125/cos(HOVER_PITCH_DEG))
 
-# [m] EndPose 명령 기준점 → 그리퍼 손끝 거리. 물리적 손가락 길이가 아니라 펌웨어
-# EndPose 기준점과 URDF link6 원점의 불일치까지 합친 값이다 — 그래서 joint7
-# 장착점(135.8mm)보다 짧은 값이 나올 수 있다. 실기 확정값은 launch가 준다.
 EE_GRIP_OFFSET = 0.135
 
 HOLD_MAX = 12        # [스텝] 카메라 관측이 이보다 오래 끊기면 값을 못 믿는다
-ARM_BASE_YAW_DEG = 90.0   # [deg] 팔이 차체 기준 90도 돌아서 장착됨 — EndPoseCtrl XY 변환에 쓴다
+ARM_BASE_YAW_DEG = 90.0   # [deg] 팔이 차체 기준 90도 돌아서 장착됨
 
 TOOL_AXIS_LOCAL = np.array([0.0, 0.0, 1.0])    # PiPER link6 로컬 +Z축
 GRIPPER_DOWN    = np.array([0.0, 0.0, -1.0])   # 그리퍼가 향해야 하는 world 방향(아래)
@@ -37,9 +27,6 @@ GRASP_PITCH_DEG = 0.0   # [deg] grasp 자세의 팔 접근 pitch — HOVER_PITCH
 _gp = math.radians(GRASP_PITCH_DEG)
 GRASP_APPROACH_DIR = np.array([0.0, math.sin(_gp), -math.cos(_gp)])   # world 기준 접근방향(단위벡터)
 
-# place 전용 pitch. 선반이 픽보다 높으면 픽과 같은 수직접근(0°)으로는 IK가 안 풀려
-# 기울여야 하는 경우가 있다. 실기는 launch의 place_pitch_deg로 주며, arm_node가
-# 그 값으로 접근방향 벡터를 직접 만든다.
 PLACE_PITCH_DEG = 30.0
 
 SEARCH_Q = np.radians([0, 45, -90, 0, 45, 0])   # 대기/중립 자세
@@ -148,8 +135,7 @@ def quat_from_two_vec(u, v):  # 벡터 u를 v로 돌리는 최소 회전 — 그
     ax = np.cross(u,v); q = np.array([1.0+d,*ax]); return q/np.linalg.norm(q)
 
 # =============================================================================
-# §2. 마커 기하 — 순수 함수. vision_node가 씬 접근 없이 마커 면의 자세/오프셋을
-# 상수만으로 재구성할 수 있게 한다.
+# §2. 마커 기하 — 순수 함수. vision_node가 씬 접근 없이 마커 면의 자세/오프셋을 계산
 # =============================================================================
 
 def _plate_basis(n):  # 면 법선 n으로부터 그 면의 좌표축 3개를 만든다
@@ -174,8 +160,7 @@ def compute_marker_faces():  # 물체 옆면 마커 4개의 자세·오프셋 �
     return faces
 
 # =============================================================================
-# §3. 토픽 페이로드 패킹/언패킹 — Float32MultiArray 스키마를 한 곳에서만
-# 정의한다(여러 노드가 각자 순서를 외워서 어긋나는 사고 방지).
+# §3. 토픽 페이로드 패킹/언패킹 — Float32MultiArray 스키마를 한 곳에서만 정의
 # =============================================================================
 
 def pack_chassis_pose(bx, by, phi, valid, marker_id, sim_step=0, bz=0.0):  # 차체캠 결과 → Float32MultiArray 페이로드

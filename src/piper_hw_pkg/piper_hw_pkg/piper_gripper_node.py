@@ -24,11 +24,11 @@ SMC_A_RATE    = 0.01
 SMC_A_MIN     = 0.30    # α 하한 
 SMC_A_MAX     = 1.00    # α 상한 
 GRIP_CLOSE_SCALE = 0.50  # SMC_ENABLED=False일 때 고정 α
-GRIPPER_EFFORT_LIMIT_NM = 2.0  # [N·m] TODO(실측 필요) 안전 상한
+GRIPPER_EFFORT_LIMIT_NM = 2.0  # [N·m]  안전 상한
 
 CONTACT_F_MIN       = 0.3   # [N·m] 감지 토크 
 GRIP_JUDGE_BY_FORCE = True
-GRIP_WARMUP_N       = 2
+GRIP_WARMUP_N       = 2     # 그리퍼 웜업
 GRIP_F_CONTACT_N    = 5
 GRIP_SETTLE_N       = 20
 GRIP_SMC_SETTLE     = True
@@ -57,8 +57,7 @@ class PiperGripperNode(Node):  # 그리퍼 힘제어 — α-SMC로 접촉력을 
 
         self.pub_target = self.create_publisher(Float32MultiArray, "/piper/gripper_target_cmd", 10)
         self.pub_done = self.create_publisher(Bool, "/gripper/done", 1)
-        # 파지 성공 판정용 상시 발행 — /gripper/done(1회성 접촉 bool)만으로는
-        # "닫히긴 했는데 사이에 아무것도 없다"를 구분 못 한다(스트로크가 그걸 말해준다).
+        # 파지 성공 판정용 상시 발행 
         self.pub_grip_state = self.create_publisher(Float32MultiArray, "/gripper/grip_state", 10)
         self.pub_status = self.create_publisher(String, "/gripper/status", 5)
 
@@ -70,7 +69,7 @@ class PiperGripperNode(Node):  # 그리퍼 힘제어 — α-SMC로 접촉력을 
         self._open_timer = self.create_timer(3.0, self._open_on_startup)
         self.get_logger().info("piper_gripper_node 초기화 완료 — /gripper/cmd 대기")
 
-    def _open_on_startup(self):  # 기동 1회 오픈 — 이전 파지에서 닫힌 채 시작하는 것 방지
+    def _open_on_startup(self):  # 기동 1회 오픈
         self._open_timer.cancel()
         self.grip_alpha = 0.0
         self._publish_target(0.0)
@@ -78,9 +77,6 @@ class PiperGripperNode(Node):  # 그리퍼 힘제어 — α-SMC로 접촉력을 
 
     def _on_feedback(self, msg: Float32MultiArray):  # 개구부·접촉력 수신(부호 제거) → /gripper/grip_state로 재발행
         angle_mm, effort_nm, foc = msg.data
-        # ★ 닫는 방향 저항은 음수로 들어온다(여는 쪽이 양수). 부호를 안 지우면
-        # CONTACT_F_MIN 비교가 항상 실패해 "접촉 미감지"로 뜨면서 SMC가 계속 더
-        # 닫으라고만 명령해 펌웨어 토크 한계까지 밀어붙인다.
         self.F_con = abs(float(effort_nm))
         self.foc_status = int(foc)
         self.stroke_mm = float(angle_mm)
@@ -114,12 +110,12 @@ class PiperGripperNode(Node):  # 그리퍼 힘제어 — α-SMC로 접촉력을 
         self._publish_target(self.grip_alpha)
 
     def _smc_alpha_command(self, F_contact):  # α-SMC 1스텝 — 목표력과의 오차를 경계층으로 포화시켜 α를 갱신
-        s_surf = SMC_F_TARGET - float(F_contact)
-        sat = float(np.clip(s_surf / SMC_PHI, -1.0, 1.0))
+        s_surf = SMC_F_TARGET - float(F_contact)    #얼마나 더 쥘지 목표토크(1.5)-현재 토크
+        sat = float(np.clip(s_surf / SMC_PHI, -1.0, 1.0))   #오차 -1~+1로 정규화
         da = float(np.clip(SMC_K_A * sat, -SMC_A_RATE, SMC_A_RATE))
         if self.holding and da < 0.0:
             da = 0.0
-        self.grip_alpha = float(np.clip(self.grip_alpha + da, SMC_A_MIN, SMC_A_MAX))
+        self.grip_alpha = float(np.clip(self.grip_alpha + da, SMC_A_MIN, SMC_A_MAX))    #계속 잡기
         return self.grip_alpha
 
     def _tick(self, _msg: Int32):  # 60Hz — SMC 갱신 → 접촉 판정 → 안정화/타임아웃이면 done 발행

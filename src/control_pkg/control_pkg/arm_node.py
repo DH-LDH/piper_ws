@@ -34,29 +34,29 @@ EE_SPEED_LIFT  = 0.06    # [m/s] 리프트 속도
 MOVE_L_PERIOD  = 3       # [스텝] 이 주기마다 한 번씩 목표점 갱신
 
 # 파지점 기하
-APPROACH_DIST     = 0.05   # [m] 파지점 위 pre-grip 대기 높이 (launch: approach_dist)
-GRASP_DEPTH_EXTRA = 0.010  # [m] 마커면보다 더 내려가는 깊이 = 물체 높이/2 (launch: grasp_depth_extra)
+APPROACH_DIST     = 0.05   # [m] 파지점 위 pre-grip 대기 높이 
+GRASP_DEPTH_EXTRA = 0.010  # [m] 마커면보다 더 내려가는 깊이 = 물체 높이/2 
 
 # 재검출 수용 한계 — XY 오검출은 헛집고 재시도하면 되지만 z 오검출은 테이블을 찍는다
 DETECT_MAX_ERR = 0.25  # [m] 최초 검출이 기대 위치에서 이보다 벗어나면 오검출로 기각
 PRE_REDETECT     = True
-PRE_REDETECT_MAX_XY   = 0.12  # [m] pre 구간 XY 누적 허용 (launch: redetect_max_xy)
-GRASP_JUMP_MAX_XY     = 0.15  # [m] grasp 구간 XY 누적 허용 (launch: grasp_jump_max_xy)
-EIH_Z_UP_MAX          = 0.03  # [m] anchor보다 위로 허용하는 한계 (launch: eih_z_up_max)
+PRE_REDETECT_MAX_XY   = 0.12  # [m] pre 구간 XY 누적 허용 
+GRASP_JUMP_MAX_XY     = 0.15  # [m] grasp 구간 XY 누적 허용 
+EIH_Z_UP_MAX          = 0.03  # [m] anchor보다 위로 허용하는 한계 
 
 # GRASP 하강 중 실시간 추종
 GRASP_CORR_ENABLED  = True   # 차체캠 델타보정 — 베이스가 움직이는 구성에서만 의미 있음
 GRASP_CORR_JUMP_MAX = 0.08   # [m] 직전 대비 점프가 이보다 크면 기각(마커 면 전환 방어)
 GRASP_EIH_TRACK_ENABLED = True   # 손목캠 재검출로 하강 중 파지점 갱신
 GRASP_Z_DROP_MAX        = 0.05   # [m] anchor보다 이만큼 낮은 z는 "떨어진 물체"로 기각
-GRASP_Z_BELOW_ANCHOR_MAX = 0.02  # [m] anchor 아래로 따라 내려갈 수 있는 한계 (launch: grasp_z_below_anchor_max)
+GRASP_Z_BELOW_ANCHOR_MAX = 0.02  # [m] anchor 아래로 따라 내려갈 수 있는 한계 
 
 # place — 마커 위에 그대로 놓으면 마커를 덮어 재검출이 끊기므로 비켜서 놓는다
 PLACE_DETECT_TIMEOUT   = 900    # [스텝, 15s] 이 안에 상판 마커를 못 보면 추정치로 진행
 PLACE_REDETECT_MAX     = 0.06   # [m] 1회 보정 상한
 PLACE_Z_DROP_MAX       = 0.05   # [m] anchor보다 이만큼 낮은 z는 오검출로 기각
-PLACE_HOME_SETTLE_STEPS = 180   # [스텝] 복귀 대기 — MOVE J는 도달 확인이 안 돼 시간으로만 (launch: 600)
-PLACE_READY_STEPS = 150         # [스텝] 중립 자세 복귀 대기 (launch: 600)
+PLACE_HOME_SETTLE_STEPS = 180   # [스텝] 복귀 대기 — MOVE J는 도달 확인이 안 돼 시간으로만 
+PLACE_READY_STEPS = 150         # [스텝] 중립 자세 복귀 대기 
 PLACE_INSET_M       = 0.035   # [m] 마커 중심→놓는점 (마커 한 변과 같은 값)
 PLACE_RELEASE_GAP   = 0.005   # [m] 릴리즈 시 물체 바닥과 선반면 간격
 PLACE_RETREAT_DIST  = 0.05    # [m] 릴리즈 후 수직 후퇴 — 안 하면 손가락이 놓은 물체를 스친다
@@ -65,10 +65,10 @@ PLACE_RETREAT_DIST  = 0.05    # [m] 릴리즈 후 수직 후퇴 — 안 하면 �
 
 # 물리 도달 확인 — _move_l의 done은 시간 기준이라 실제 팔 위치를 보장하지 않는다
 PRE_ARRIVE_TOL = 0.010        # [m] pre/hover/lift 도달 허용오차
-PRE_ARRIVE_MAX_WAIT = 300     # [스텝] 도달 대기 상한 — 넘기면 그냥 진행 (launch: arrive_max_wait, 900)
-GRASP_ARRIVE_TOL = 0.004      # [m] 3D 허용오차 — 곧 파지 깊이 오차다 (launch: grasp_arrive_tol)
-GRASP_ARRIVE_Z_TOL = 0.002    # [m] z는 더 좁게 — 덜 내려가면 윗모서리만 문다 (launch: grasp_arrive_z_tol)
-GRASP_ARRIVE_MAX_WAIT = 300   # [스텝] grasp 도달 대기 상한 (위와 같은 파라미터)
+PRE_ARRIVE_MAX_WAIT = 300     # [스텝] 도달 대기 상한 — 넘기면 그냥 진행 
+GRASP_ARRIVE_TOL = 0.004      # [m] 3D 허용오차 — 곧 파지 깊이 오차
+GRASP_ARRIVE_Z_TOL = 0.002    # [m] z는 더 좁게 
+GRASP_ARRIVE_MAX_WAIT = 300   # [스텝] grasp 도달 대기 상한 
 
 LIFT_HEIGHT = 0.10       # [m] 파지 후 들어올릴 높이
 
@@ -84,7 +84,7 @@ VERIFY_LOW_HITS   = 2     # 낮은 높이 관측이 이만큼 쌓이면 실패 �
 # [그리퍼 방식] 물체를 물면 손가락이 물체 폭에서 멈추고, 헛집으면 0 근처까지 닫힌다.
 GRIP_VERIFY_WINDOW_N   = 60    # [스텝, 1s] 리프트 후 그리퍼 상태 관찰 시간
 GRIP_VERIFY_MIN_SAMPLE = 10    # 이만큼은 받아야 판정(토픽 유실 방어)
-GRIP_STROKE_OFFSET_MM  = 0.0   # [mm] 보고 개구부 − 실제 간격. 빈손으로 닫아 실측 (launch: 9.5)
+GRIP_STROKE_OFFSET_MM  = 0.0   # [mm] 보고 개구부 − 실제 간격. 빈손으로 닫아 실측 
 GRIP_STROKE_MIN_RATIO  = 0.50  # 물체 폭 대비 이 비율 밑이면 "사이에 아무것도 없다"
 GRIP_STROKE_MARGIN_MM  = 10.0  # [mm] 물체 폭+이 값보다 넓으면 "안 물었거나 덜 닫힘"
 GRIP_SLIP_DROP_MM      = 3.0   # [mm] 그립 직후 대비 이만큼 더 닫히면 리프트 중 놓친 것
@@ -275,8 +275,7 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
             float(self.declare_parameter("place_expected_y_body", PLACE_CENTER_BODY_GUESS[1]).value),
             float(self.declare_parameter("place_expected_z_body", PLACE_CENTER_BODY_GUESS[2]).value),
         ], float)
-        # 도킹 단계가 없으므로 위 추정치를 갱신해 줄 주체가 없다 — place_detect의
-        # 마커 재검출이 이 값을 실제 위치로 보정한다.
+
         self.place_wait_n = 0        # place_descend의 물리도달 대기 카운터
         self.place_top_new = None    # 손목캠이 본 place 마커 최신 관측(body_link 상대)
         self.ml_place_anchor = None  # place_detect 최초 검출 놓는점(z-drop/점프 판정 기준)
@@ -312,12 +311,12 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
 
     # ── 구독 콜백 ────────────────────────────────────────────────────────────
     def _on_lock(self, msg: Bool):  # AMR 정위치 신호 → wait에서 hover로 전환, 픽 시퀀스 개시
-        if not msg.data or self.arm_phase != "wait": return
+        if not msg.data or self.arm_phase != "wait": return     #안전로직
         print("      → 락 수신, 팔 파지 시퀀스 개시\n")
-        self.arm_phase = "hover"; self.arm_step = 0
+        self.arm_phase = "hover"; self.arm_step = 0     
         if self.ee_pose is not None:
-            self.ml_start = self.ee_pose.copy()
-        self.ml_target = self._obj_center_body_rel() - HOVER_APPROACH_DIR * (HOVER_STANDOFF + self.ee_grip_offset)
+            self.ml_start = self.ee_pose.copy()     # 지금 위치 출발점
+        self.ml_target = self._obj_center_body_rel() - HOVER_APPROACH_DIR * (HOVER_STANDOFF + self.ee_grip_offset)      # 물체의 대략 위치가 목표 (추정치)
 
     def _obj_center_body_rel(self):  # 물체 대략 위치(마커 보기 전 초기 조준점). launch 파라미터로 준다
         """물체 대략 위치(body_link 기준) — obj_expected_*_body 파라미터로 설정."""
@@ -351,7 +350,7 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
         return float(np.max(np.abs(np.degrees(
             self.joint_now - np.asarray(q_target, float)))))
 
-    def _joint_settled(self, label, q_target, max_steps):  # 관절 이동 완료 판정 — 기본은 시간 기준, tol>0이면 실제 오차 기준
+    def _joint_settled(self, label, q_target, max_steps):  # 관절 이동 완료 판정
         """관절 이동 완료 판정(True=진행해도 됨).
         place_joint_arrive_tol_deg가 0 이하면 판정은 종전처럼 "시간"으로 하고 실제
         관절 오차는 로그로만 남긴다 — 정상 오차가 얼마인지 모르는 채로 좁게 잡으면
@@ -383,7 +382,7 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
     def _on_gripper_done(self, msg: Bool):  # 그리퍼가 닫기를 끝냈다는 1회성 신호(접촉 여부 포함)
         self.grip_contact_result = bool(msg.data)
 
-    def _on_grip_state(self, msg: Float32MultiArray):  # 그리퍼 상시 상태 수신 — 파지 판정의 유일한 입력. 최소 개구부도 여기서 추적
+    def _on_grip_state(self, msg: Float32MultiArray):  # 그리퍼 상시 상태 수신 
         """그리퍼 상시 상태(개구부/접촉) — 그리퍼 기반 파지 판정의 유일한 입력."""
         stroke, effort, contact, holding, _active = unpack_grip_state(msg.data)
         self.grip_stroke = stroke
@@ -393,11 +392,10 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
         self.stroke_recent.append(stroke)
         if len(self.stroke_recent) > VERIFY_BASE_N:
             del self.stroke_recent[0]
-        # 리프트~verify 동안의 최소 개구부 — 중간에 한 번이라도 빈손 수준으로 닫히면
-        # 그 순간 물체를 놓친 것이다(마지막 값만 보면 다시 벌어진 프레임에 속는다).
+        # 리프트~verify 동안의 최소 개구부 
         if self.arm_phase in ("lift", "verify"):
             if self.grip_stroke_min is None or stroke < self.grip_stroke_min:
-                self.grip_stroke_min = stroke
+                self.grip_stroke_min = stroke # 최소값 갱신
         if self.arm_phase == "verify":
             self.grip_v_n += 1
 
@@ -406,9 +404,9 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
         월드 -Z로, 접근축(GRASP_APPROACH_DIR) 보정은 그리퍼 길이(self.ee_grip_offset)에만 걸어야
         한다 — 섞어서 한 번에 빼면 내려간 만큼 옆으로도 밀린다. detect/pre/grasp가 공유하는
         단일 함수로 통일(따로 복붙하면 어긋나기 쉬움)."""
-        mk_w = mk + np.array([0.0, 0.0, self.body_link_world_z])
-        obj_c = mk_w - np.array([0.0, 0.0, self.grasp_depth_extra])
-        return obj_c - GRASP_APPROACH_DIR * self.ee_grip_offset
+        mk_w = mk + np.array([0.0, 0.0, self.body_link_world_z])    # body->world z 보정
+        obj_c = mk_w - np.array([0.0, 0.0, self.grasp_depth_extra]) # 마커 면에서 world -z로 
+        return obj_c - GRASP_APPROACH_DIR * self.ee_grip_offset     # 그리퍼 오프셋만큼 빼주기 
 
     def _place_point(self, mk):  # place 마커 위치 → 놓는 목표점
         """place 마커 위치(mk, 몸체좌표) → link6 IK 목표(놓는점)."""
@@ -416,7 +414,7 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
 
     def _place_inset_dir(self, mk_w):  # 마커에서 어느 방향으로 비킬지 — 기본은 마커 자신의 -Y 방향
         """마커 중심에서 놓는점까지 "어느 방향으로" 비킬지 — body XY 단위벡터."""
-        if self.place_inset_mode == "marker_y":
+        if self.place_inset_mode == "marker_y":     # 마커의 -y 방향 
             if self.place_top_yaw is None:
                 # 마커를 아직 못 봤다(사전 추정치로 계산 중) — radial로 폴백한다.
                 print("    ★ [place] marker_y 모드인데 마커 yaw 미수신 — radial로 폴백")
@@ -424,7 +422,7 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
                 # 마커 자신의 -Y (+Y축 방향이 place_top_yaw)
                 return np.array([-np.cos(self.place_top_yaw),
                                   -np.sin(self.place_top_yaw)])
-        elif self.place_inset_mode == "body_y":
+        elif self.place_inset_mode == "body_y":     # 고정 [0, -1]
             return np.array([0.0, -1.0])
         v = mk_w[:2]
         n = float(np.linalg.norm(v))
@@ -471,8 +469,8 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
         """그리퍼 개구부+접촉만으로 파지 성공 여부를 판정한다(None=판정 보류).
         차체캠이 없는 실물 v1의 기본 경로 — 카메라 시야/오클루전에 의존하지 않는다."""
         w = self.obj_width_m * 1000.0
-        lo = self.grip_stroke_offset + w * GRIP_STROKE_MIN_RATIO
-        hi = self.grip_stroke_offset + w + GRIP_STROKE_MARGIN_MM
+        lo = self.grip_stroke_offset + w * GRIP_STROKE_MIN_RATIO    # 하한 (0.50)
+        hi = self.grip_stroke_offset + w + GRIP_STROKE_MARGIN_MM    # 상한 (10.0)
 
         if self.grip_stroke is None:
             # 토픽이 아예 안 온다 — 판정 근거가 없으므로 접촉 플래그로 폴백
@@ -521,7 +519,7 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
                   f"실측으로 맞출 것(빈손으로 닫았을 때의 보고값)")
         return True
 
-    def _verify(self):  # verify_mode에 따라 판정 주체 선택 — 현재는 그리퍼 방식만 산다
+    def _verify(self):  # verify_mode에 따라 판정 주체 선택 
         """verify_mode에 따라 판정 주체를 고른다(None=판정 보류)."""
         # [차체캠] 
         # if self.verify_mode == "chassis":
@@ -547,27 +545,26 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
             return
         print(f"  [팔] ✗ 파지 검증 실패(헛집음) — 재시도 {self.grasp_attempt}/{MAX_GRASP_RETRY} "
               f"준비: 그리퍼 오픈 → 재상승 → 재진입")
-        self.pub_gripper_cmd.publish(Bool(data=False))  # 릴리즈
+        self.pub_gripper_cmd.publish(Bool(data=False))  # 그리퍼 오픈
         self.ml_start = (self.ee_pose.copy() if self.ee_pose is not None
                           else self.ml_target.copy())
-        self.ml_target = self._obj_center_body_rel() - HOVER_APPROACH_DIR * (HOVER_STANDOFF + self.ee_grip_offset)
+        self.ml_target = self._obj_center_body_rel() - HOVER_APPROACH_DIR * (HOVER_STANDOFF + self.ee_grip_offset)  # hover 목표 설정
         # [차체캠] self.verify_bz0 / lift_bz_max / verify_* 리셋
         self.grip_stroke_at_grip = None; self.grip_stroke_min = None; self.grip_v_n = 0
         self.hover_wait_n = 0
         self.arm_phase = "hover"; self.arm_step = 0
 
-    def _on_eih(self, msg: Float32MultiArray):  # 손목캠 픽 마커 수신 — 매 프레임 파지점을 다시 계산해 추종한다
+    def _on_eih(self, msg: Float32MultiArray):  # 손목캠 픽 마커 수신 
         x, y, z, valid, _yaw = unpack_eih_marker(msg.data)
         self.eih_new = (np.array([x, y, z], float) if valid else None)
 
         if self.arm_phase == "detect":
             if self.eih_new is not None:
-                mk = self.eih_new
+                mk = self.eih_new       # detect
                 mk_exp = np.array([self.obj_expected_x_body, self.obj_expected_y_body,
                                    self.obj_expected_z_body + MK_TOP_OFFSET])
                 err = float(np.linalg.norm(mk - mk_exp))
-                if err > DETECT_MAX_ERR:
-                    # 오검출 — 기각하고 다음 프레임을 기다린다
+                if err > DETECT_MAX_ERR:    # 25cm 넘게 벗어나면 기각
                     self.detect_rej_n += 1
                     if self.detect_rej_n % 20 == 1:
                         print(f"    [검출 기각] 기대 위치에서 {err*1000:.0f}mm 벗어남 "
@@ -575,17 +572,15 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
                               f"({self.detect_rej_n}회째)  mk={mk.round(4)}")
                     return
                 grasp = self._grasp_point(mk)
-                pre = grasp - GRASP_APPROACH_DIR * self.approach_dist
+                pre = grasp - GRASP_APPROACH_DIR * self.approach_dist   #pre 접근 중 추종
                 print(f"\n  [팔] 윗면 마커 검출 ✓ (몸체) {mk.round(4)}")
-                # 마커는 물체 중심이 아니라 그 위(윗면+보드/셀 두께)에 붙어 있다 —
-                # 기대값도 그 오프셋을 반영해야 검출 오차를 제대로 읽을 수 있다.
                 print(f"       기대값 ({self.obj_expected_x_body}, {self.obj_expected_y_body}, "
                       f"{self.obj_expected_z_body + MK_TOP_OFFSET:.3f})")
                 print(f"       파지점 {grasp.round(4)}")
                 self.ml_start = (self.ee_pose.copy() if self.ee_pose is not None
                                   else self.ml_target.copy())
                 self.ml_target = pre
-                self.ml_grasp = grasp
+                self.ml_grasp = grasp   # 하강 중 추종
                 self.ml_grasp_anchor = grasp.copy()  # grasp 단계 재검출의 고정 기준점
                 self.pre_try_n = 0; self.pre_miss_n = 0
                 self.pre_miss_run = 0; self.pre_miss_max = 0
@@ -675,11 +670,11 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
         d_xy = float(np.linalg.norm(g2[:2] - anc[:2]))
         dz = float(g2[2] - anc[2])
         if d_xy > max_xy:
-            return False, f"XY {d_xy*1000:.0f}mm > {max_xy*1000:.0f}mm"
+            return False, f"XY {d_xy*1000:.0f}mm > {max_xy*1000:.0f}mm"     # x, y 너무 튐 (120mm 이상)
         if dz > self.eih_z_up_max:
-            return False, f"z +{dz*1000:.0f}mm > +{self.eih_z_up_max*1000:.0f}mm"
+            return False, f"z +{dz*1000:.0f}mm > +{self.eih_z_up_max*1000:.0f}mm"   # z 너무 튐 (30mm 이상)
         if -dz > GRASP_Z_DROP_MAX:
-            return False, f"z {dz*1000:.0f}mm (떨어진 물체)"
+            return False, f"z {dz*1000:.0f}mm (떨어진 물체)"    # z 너무 내려감 (50mm 이상)
         return True, ""
 
     def _on_step_confirm(self, msg: Bool):  # step_confirm 모드에서 다음 단계 진행 승인 수신
@@ -703,14 +698,14 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
             return
         self._gate_pub_phase = ap
 
-        if ap == "wait":
+        if ap == "wait":  # AMR 락 대기 — SEARCH_Q만 유지 발행하고 arm_step도 올리지 않는다
             self.pub_joint_hold.publish(Float32MultiArray(
                 data=pack_joint_hold_target(SEARCH_Q)))
             return
 
         self.arm_step += 1
 
-        if ap == "hover":
+        if ap == "hover":  # 물체 추정위치 위로 이동 — 마커를 화각에 넣는 게 목적이라 정밀할 필요 없다
             done = self._move_l(EE_SPEED_HOVER)
             if done:
                 err_h = ((self.ee_pose - self.ml_target)
@@ -730,11 +725,11 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
                 print(f"  [팔] HOVER 도달 → 윗면 마커 검출")
                 self.arm_phase = "detect"; self.arm_step = 0
 
-        elif ap == "detect":
+        elif ap == "detect":  # 마커 검출 대기 — 전이는 _on_eih가 하고 여기선 타임아웃만 본다
             if self.arm_step > 900:
                 print(f"  ★ 팔: 마커 검출 실패로 중단"); self.arm_phase = "fail"
 
-        elif ap == "pre":
+        elif ap == "pre":  # 파지점 위 approach_dist까지 접근 — 재검출로 파지점을 계속 보정한다
             if self.arm_step % 180 == 0:  # 3초마다 진단(막히면 원인 바로 보이게)
                 dist_now = (float(np.linalg.norm(self.ee_pose - self.ml_target))
                             if self.ee_pose is not None else -1.0)
@@ -779,7 +774,7 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
                 self.grasp_wait_n = 0
                 self.arm_phase = "grasp"; self.arm_step = 0
 
-        elif ap == "grasp":
+        elif ap == "grasp":  # 파지점까지 최저속 하강 — 허용오차가 가장 좁다(곧 파지 깊이 오차)
             self.ml_target = self.ml_grasp.copy()
             # [차체캠] 하강 중 베이스 드리프트를 XY로 따라가던 보정 
             # if self.chassis_est is not None and self.chassis_age <= HOLD_MAX:
@@ -858,7 +853,7 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
                 self.arm_phase = "grip"; self.arm_step = 0
                 self.grip_contact_result = None
 
-        elif ap == "grip":
+        elif ap == "grip":  # 그리퍼에 닫기 1회 명령 후 완료 신호 대기 — 이동은 하지 않는다
             if self.arm_step == 1:
                 print(f"  [팔] 그리퍼 닫기 명령 전송")
                 self.pub_gripper_cmd.publish(Bool(data=True))
@@ -880,19 +875,19 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
                           f"{self.grip_stroke_offset:.1f}mm 기대)")
                 self.arm_phase = "lift"; self.arm_step = 0
 
-        elif ap == "lift":
+        elif ap == "lift":  # LIFT_HEIGHT만큼 수직 상승 — 파지 판정
             done = self._move_l(EE_SPEED_LIFT)
             if done:
                 if not self._wait_physical_arrive("lift_wait_n", PRE_ARRIVE_TOL, "lift"):
                     return
                 self.arm_phase = "verify"; self.arm_step = 0
 
-        elif ap == "verify":
+        elif ap == "verify":  # 개구부·접촉으로 파지 성공 판정 
             verdict = self._verify()
             if verdict is not None:
                 self._on_pick_verdict(verdict)
 
-        elif ap == "place_wait":
+        elif ap == "place_wait":  # place_lock 대기 — 90초 넘으면 포기하고 place_done으로 간다
             if self.arm_step > 5400:  # 90초 안전
                 print("  ★ 팔: place_lock 대기 타임아웃 — 포기")
                 self.arm_phase = "place_done"; self.arm_step = 0
@@ -900,7 +895,7 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
         # ─────────────────────────────────────────────────────────────────
         # 마커 기반 정밀 배치
         # ─────────────────────────────────────────────────────────────────
-        elif ap == "place_ready":
+        elif ap == "place_ready":  # 중립 자세(SEARCH_Q)로 관절 복귀 — place 시퀀스의 출발점을 맞춘다
             self.pub_joint_hold.publish(Float32MultiArray(
                 data=pack_joint_hold_target(SEARCH_Q)))
             if self._joint_settled("place_ready", SEARCH_Q, self.place_ready_steps):
@@ -912,7 +907,7 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
                 self.place_hover_wait_n = 0
                 self.arm_phase = "place_hover"; self.arm_step = 0
 
-        elif ap == "place_hover":
+        elif ap == "place_hover":  # 놓을 곳 위로 이동 — 뒤처진 채 검출하면 마커를 먼 거리에서 재게 된다
             done = self._move_l(EE_SPEED_HOVER)
             if done:
                 # 여기서 뒤처진 채 검출하면 place 마커를 예상보다 먼 거리에서 재게 된다.
@@ -923,8 +918,7 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
                 self.ml_place_anchor = None
                 self.arm_phase = "place_detect"; self.arm_step = 0
 
-        elif ap == "place_detect":
-            # pick의 hover→detect와 동일 패턴 — 손목캠으로 상판 마커(ID6)를 보고 놓는점을 계산
+        elif ap == "place_detect":  # pick의 hover→detect와 동일 패턴 — 손목캠으로 place 마커(ID3)를 보고 놓는점을 계산
             if self.place_top_new is not None:
                 pt = self._place_point(self.place_top_new)
                 print(f"\n  [팔] 상판 마커 검출 ✓ (몸체) {self.place_top_new.round(4)}")
@@ -969,13 +963,7 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
                 self.place_wait_n = 0
                 self.arm_phase = "place_descend"; self.arm_step = 0
 
-        elif ap == "place_descend":
-            # pick의 grasp 단계와 동일한 실시간 재검출+보정 — 최초 검출(anchor) 대비
-            # 점프가 크면(오검출) 기각하고, anchor보다 낮은 z는 상판을 뚫고 내려가는
-            # 걸 막기 위해 clamp한다(GRASP_Z_DROP_MAX와 같은 방향의 안전장치).
-            # 쥔 물체가 마커를 가리면 근접 재검출이 오히려 해가 된다(부분 오클루전
-            # PnP는 코너 일부만 보고 엉뚱한 자세를 낸다) — freeze면 최초 검출점으로
-            # 그대로 내려간다.
+        elif ap == "place_descend":  # 놓는점까지 최저속 하강 — 재검출 보정은 위로만 허용한다
             if self.place_freeze_after_detect and self.arm_step == 1:
                 print(f"    [PLACE] 맹목 하강 모드 — 최초 검출 놓는점 고정 "
                       f"{self.ml_target.round(4)}")
@@ -1004,10 +992,7 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
                 print(f"  [팔] PLACE 목표 도달(잔여 {dist*1000:.1f}mm) → 릴리즈 단계로")
                 self.arm_phase = "place_release"; self.arm_step = 0
 
-        elif ap == "place_release":
-            # 여는 명령을 place_release 첫 틱으로 미뤘다 — grip 단계와 같은 이유로,
-            # step_confirm이 켜져 있으면 Enter 전엔 물체를 놓지 않는다(놓기 직전에
-            # 눈으로 확인하고 중단할 수 있어야 한다).
+        elif ap == "place_release":  # 그리퍼 열기 1회 명령 후 60틱 대기
             if self.arm_step == 1:
                 print(f"  [팔] 그리퍼 열기 명령 전송")
                 self.pub_gripper_cmd.publish(Bool(data=False))
@@ -1021,19 +1006,16 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
                 self.retreat_wait_n = 0
                 self.arm_phase = "place_retreat"; self.arm_step = 0
 
-        elif ap == "place_retreat":
+        elif ap == "place_retreat":  # 수직 후퇴 — 먼저 빠지지 않으면 손가락이 방금 놓은 물체를 스친다
             done = self._move_l(EE_SPEED_LIFT)
             if done:
-                # 여기서 안 기다리면 실제로 10mm쯤만 뜬 채 place_home(관절 복귀)이
-                # 시작돼 손가락이 방금 놓은 물체를 스친다.
                 if not self._wait_physical_arrive("retreat_wait_n", PRE_ARRIVE_TOL,
                                                    "place_retreat"):
                     return
                 print(f"  [팔] 후퇴 완료 → 초기 자세로 복귀")
                 self.arm_phase = "place_home"; self.arm_step = 0
 
-        elif ap == "place_home":
-            # 플레이스가 끝나면 팔을 대기자세(SEARCH_Q)로 되돌린다(직접 관절목표, IK 경유 안 함)
+        elif ap == "place_home":  # 대기자세로 관절 복귀 
             self.pub_joint_hold.publish(Float32MultiArray(
                 data=pack_joint_hold_target(self.place_home_q)))
             if self._joint_settled("place_home", self.place_home_q,
@@ -1046,9 +1028,7 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
                 self._place_done_logged = False
                 self.arm_phase = "place_done"; self.arm_step = 0
 
-        elif ap == "place_done":
-            # 마지막 자세를 계속 지령한다 — 드라이버가 같은 값은 중복생략하므로 CAN
-            # 부하는 없다. place_done_q가 place_home_q와 같으면 실질적으로 제자리 유지.
+        elif ap == "place_done":  # 최종 자세 유지
             self.pub_joint_hold.publish(Float32MultiArray(
                 data=pack_joint_hold_target(self.place_done_q)))
             if not self._place_done_logged:
@@ -1066,14 +1046,14 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
         움직이는 물체를 쫓을 땐 total이 같이 늘어나 영원히 안 끝났음 — 실측 확인.)"""
         if self.arm_step % MOVE_L_PERIOD != 0:
             return False
-        if self._move_l_pos is None or not np.array_equal(self._move_l_seg_start, self.ml_start):
+        if self._move_l_pos is None or not np.array_equal(self._move_l_seg_start, self.ml_start):   #ml_start가 바뀌면 새 구간으로
             self._move_l_pos = self.ml_start.copy()
         self._move_l_seg_start = self.ml_start.copy()
-        target = self.ml_target
+        target = self.ml_target     #타겟 위치 바뀌면 목표 수정 
         remaining = target - self._move_l_pos
         dist = float(np.linalg.norm(remaining))
-        step = speed * (MOVE_L_PERIOD/60.0)
-        if dist <= step:
+        step = speed * (MOVE_L_PERIOD/60.0) # 60틱 기준 거리 계산 (이번에 갈 거리 = 속도 * 경과시간)
+        if dist <= step:    #도착
             self._move_l_pos = target.copy()
             done = True
         else:
