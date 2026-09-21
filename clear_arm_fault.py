@@ -9,7 +9,7 @@
 # piper_real.launch.py를 끈 상태(또는 최소한 driver_node가 죽은 상태)에서 쓴다.
 #
 # ★ 안전: 복구 명령 직후 짧은 순간 토크가 안 걸려 팔이 처지는 현상이 실기에서
-#   재현됨(HANDOFF_JETSON.md 5절, 2026-09-17). 반드시 팔을 손으로 받치고 실행할 것.
+#   재현됨. 반드시 팔을 손으로 받치고 실행할 것.
 #
 # 쓰는 법:
 #   python3 clear_arm_fault.py
