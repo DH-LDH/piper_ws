@@ -39,6 +39,11 @@ flowchart LR
 | `robot_state_publisher` | — | URDF 기반 링크 TF |
 
 ---
+vision_node  ──마커 위치──▶  arm_node  ──목표──▶  piper_driver_node ──CAN──▶ 팔
+     ▲                          │                        │
+     │                          ▼                        ▼
+piper_eih_camera_node      piper_gripper_node      피드백(joint_states, ee_pose)
+
 
 ## 빌드
 
