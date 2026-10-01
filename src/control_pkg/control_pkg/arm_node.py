@@ -21,6 +21,7 @@ from step22_common import (
     OBJ_S, PLACE_PITCH_DEG, PIPER_JOINT_NAMES,
     unpack_eih_marker, unpack_grip_state, pack_joint_hold_target,
 )
+from loop_profiler import declare_profile
 # [차체캠] 되살릴 때 아래도 같이 import할 것
 # from step22_common import HOLD_MAX, BOARD_T, CELL_GAP, CELL_T, unpack_chassis_pose
 
@@ -301,7 +302,10 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
         self.create_subscription(Float32MultiArray, "/gripper/grip_state", self._on_grip_state, 10)
         self.create_subscription(JointState, "/joint_states", self._on_joint_states, 10)
 
-        self.create_subscription(Int32, "/plant/tick", self._tick, 20)
+        self._prof = declare_profile(self)
+        self._prof_tick = self._prof.loop("tick") if self._prof else None
+        self.create_subscription(Int32, "/plant/tick",
+                                 self._tick_profiled if self._prof else self._tick, 20)
         self.create_timer(2.0, self._publish_status)
         self.get_logger().info(
             f"arm_node 초기화 완료 — [wait] 락 대기  (파지기하: ee_grip_offset="
@@ -682,6 +686,15 @@ class ArmNode(Node):  # 상위 제어기 — phase 상태머신으로 pick&place
             self.step_ready = True
 
     # ── 60Hz 틱 ─────────────────────────────────────────────────────────────
+    def _tick_profiled(self, msg: Int32):  # profile:=true용 래퍼. tick= 번호로 driver CSV와 맞춰 전달지연을 본다
+        p = self._prof_tick
+        p.begin()
+        ph0 = self.arm_phase
+        self._tick(msg)
+        p.note = f"{ph0};step={self.arm_step};tick={msg.data}" + (
+            f";to={self.arm_phase}" if self.arm_phase != ph0 else "")
+        p.end()
+
     def _tick(self, _msg: Int32):  # 60Hz 상태머신 본체 — phase별 동작과 전이를 전부 여기서 처리
         # [차체캠] self.chassis_age += 1
         ap = self.arm_phase

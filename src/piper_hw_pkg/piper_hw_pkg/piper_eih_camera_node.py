@@ -8,6 +8,7 @@ except Exception:
 import array
 import math
 import threading
+import time
 
 import cv2
 import numpy as np
@@ -20,6 +21,8 @@ from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import TransformStamped
 from tf2_ros import StaticTransformBroadcaster
 from rcl_interfaces.msg import SetParametersResult
+
+from loop_profiler import declare_profile
 
 # 실물 손목캠(eih) 소스: RealSense D455 컬러 스트림 → /vision/eih_image 발행.
 
@@ -43,6 +46,11 @@ class PiperEihCameraNode(Node):  # RealSense D455 → /vision/eih_image + link6�
         self._latest_lock = threading.Lock()
         self._stop_capture = threading.Event()
         self._capture_thread = None
+        self._prof = declare_profile(self)
+        self._prof_cap = self._prof.loop("capture") if self._prof else None
+        self._prof_pub = self._prof.loop("pub") if self._prof else None
+        self._latest_meta = None  # profile용 (캡처 perf_counter, frame_number)
+        self._last_pub_fn = None
 
         self.declare_parameter("cam_tcp_offset_x", CAM_TCP_OFFSET_X_DEFAULT)
         self.declare_parameter("cam_tcp_offset_y", CAM_TCP_OFFSET_Y_DEFAULT)
@@ -132,6 +140,7 @@ class PiperEihCameraNode(Node):  # RealSense D455 → /vision/eih_image + link6�
         return SetParametersResult(successful=True)
 
     def _capture_loop(self):  # 별도 스레드 — 프레임 받아 왜곡보정 후 최신 1장만 보관
+        p = self._prof_cap
         while not self._stop_capture.is_set():
             try:
                 frames = self.pipeline.wait_for_frames(1000)
@@ -140,15 +149,31 @@ class PiperEihCameraNode(Node):  # RealSense D455 → /vision/eih_image + link6�
             color = frames.get_color_frame()
             if not color:
                 continue
+            if p:
+                p.begin()  # interval = 실제 프레임 도착 간격(조도에 따른 fps 저하가 여기 보인다)
+                p.note = self._frame_note(color)
             frame_bgr = np.asanyarray(color.get_data())
             frame_bgr = cv2.remap(frame_bgr, self.map1, self.map2, cv2.INTER_LINEAR)
             rgba = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGBA)
             with self._latest_lock:
                 self._latest_rgba = rgba
+                if p:
+                    self._latest_meta = (time.perf_counter(), color.get_frame_number())
+            if p: p.end()
+
+    @staticmethod
+    def _frame_note(color):  # 프레임 번호와 실제 노출[us](지원 시) — 조도별 비교용
+        fn = color.get_frame_number()
+        md = rs.frame_metadata_value.actual_exposure
+        exp = color.get_frame_metadata(md) if color.supports_frame_metadata(md) else -1
+        return f"fn={fn};exp_us={exp}"
 
     def _on_timer(self):  # 15Hz로 최신 프레임을 /vision/eih_image에 발행
+        p = self._prof_pub
+        if p: p.begin()
         with self._latest_lock:
             rgba = self._latest_rgba
+            meta = self._latest_meta
         if rgba is None:
             return
         msg = Image()
@@ -158,6 +183,13 @@ class PiperEihCameraNode(Node):  # RealSense D455 → /vision/eih_image + link6�
         msg.step = msg.width * 4
         msg.data = array.array("B", rgba.tobytes())  # bytes 그대로 넣으면 publish()가 ~200ms로 느려짐
         self.pub_image.publish(msg)
+        if p and meta is not None:
+            p.lap("publish")
+            t_cap, fn = meta
+            p.note = f"fn={fn};dup={int(fn == self._last_pub_fn)}"  # dup=1: 새 프레임 없이 같은 장 재발행
+            self._last_pub_fn = fn
+            p.value("cap_to_pub", (time.perf_counter() - t_cap) * 1e3, p.note)
+            p.end()
 
     def destroy_node(self):  # 종료 시 캡처 스레드와 RealSense 파이프라인 정리
         self._stop_capture.set()

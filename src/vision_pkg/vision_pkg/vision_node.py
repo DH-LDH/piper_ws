@@ -22,6 +22,7 @@ from step22_common import (
     TOP_PTS, TOP_MARKER_ID, TOP_MARKER_SIZE, PLACE_TOP_MARKER_ID,
     _quat_to_R, pack_eih_marker,
 )
+from loop_profiler import declare_profile
 
 #
 #   손목 카메라(eih) → 픽/플레이스 마커 → /vision/eih_marker_body, /vision/place_marker_body
@@ -152,7 +153,10 @@ class VisionNode(Node):
         # self.pub_place = self.create_publisher(Float32MultiArray, "/vision/place_pose", 10)
 
         self.create_subscription(CameraInfo, "/vision/eih_camera_info", self._on_eih_info, _LATCH)
-        self.create_subscription(Image, "/vision/eih_image", self._on_eih_image, 5)
+        self._prof = declare_profile(self)
+        self._prof_eih = self._prof.loop("eih") if self._prof else None
+        self.create_subscription(Image, "/vision/eih_image",
+                                 self._on_eih_image_profiled if self._prof else self._on_eih_image, 5)
         # [차체캠]
         # self.create_subscription(CameraInfo, "/vision/chassis_camera_info", self._on_chassis_info, _LATCH)
         # self.create_subscription(Image, "/vision/chassis_image", self._on_chassis_image, 5)
@@ -237,18 +241,33 @@ class VisionNode(Node):
         self.pub_eih_debug.publish(out)
 
     # ── 끝단 카메라: 윗면 마커(ID0) → 몸체좌표 위치 ─────────────────────────
+    def _on_eih_image_profiled(self, msg: Image):  # profile:=true용 래퍼. stamp→처리완료 지연을 같이 남긴다
+        p = self._prof_eih
+        p.begin()
+        p.note = "no_K"
+        self._on_eih_image(msg)
+        p.end()
+        st = msg.header.stamp
+        p.value("stamp_to_done", (self._prof.now_ns() - (st.sec * 10**9 + st.nanosec)) / 1e6, p.note)
+
     def _on_eih_image(self, msg: Image):  # 핵심 경로 — 검출→포즈→게이트→몸체좌표 발행
         if self.eih_K is None: return
+        p = self._prof_eih
         dbg = self._dbg_frame(msg)
         try:
             R_bc, t_bc = _tf_to_Rt(self.tf_buffer.lookup_transform(
                 "body_link", "eih_cam", Time()))
         except Exception:
             self._dbg_publish(dbg, msg, ["NO TF body_link->eih_cam"], (0, 0, 255))
+            if p: p.note = "no_tf"
             return
+        if p: p.lap("tf")
         gray = _img_to_gray(msg)
+        if p: p.lap("gray")
+        lum = f"lum={cv2.mean(gray)[0]:.0f};" if p else ""  # 평균 밝기(0~255) — 조도 조건을 수치로 남긴다
 
         cs, ids, _ = _detect_markers(gray, self.det) # 화면의 모든 아르코 마커 검출 후 필요한 것만 detect
+        if p: p.lap("detect")
         id_list = ids.flatten().tolist() if ids is not None else []
         if dbg is not None and ids is not None:
             cv2.aruco.drawDetectedMarkers(dbg, cs, ids)
@@ -268,11 +287,15 @@ class VisionNode(Node):
                 data=pack_eih_marker(_p_body[0], _p_body[1], _p_body[2], True, _yaw)))
         else:
             self.pub_place_marker.publish(Float32MultiArray(data=pack_eih_marker(0, 0, 0, False)))
+        if p:
+            p.lap("place")
+            p.note = f"{lum}place={int(_sol is not None)}"
 
         hdr = f"pick ID{self.pick_marker_id} size={self.pick_marker_size*1000:.0f}mm"
         if self.pick_marker_id not in id_list:
             self.pub_eih.publish(Float32MultiArray(data=pack_eih_marker(0, 0, 0, False)))
             self._dbg_publish(dbg, msg, [hdr, f"NOT DETECTED (seen={id_list})"], (0, 0, 255))
+            if p: p.note += ";pick=not_detected"
             return
         idx = id_list.index(self.pick_marker_id)
         corners = cs[idx].reshape(4, 2)
@@ -281,6 +304,7 @@ class VisionNode(Node):
         if sol is None:
             self.pub_eih.publish(Float32MultiArray(data=pack_eih_marker(0, 0, 0, False)))
             self._dbg_publish(dbg, msg, [hdr, "solvePnP FAILED"], (0, 0, 255))
+            if p: p.note += ";pick=pnp_fail"
             return
         best, rvec, rep = sol
         # pick 마커 
@@ -289,13 +313,18 @@ class VisionNode(Node):
             self.pub_eih.publish(Float32MultiArray(data=pack_eih_marker(0, 0, 0, False)))
             self._dbg_publish(dbg, msg, [
                 hdr, f"REJECT rep={rep:.2f}px rel={rel*100:.1f}% side={side_px:.0f}px"], (0, 0, 255))
+            if p: p.note += f";pick=reject;rep={rep:.2f}"
             return
         self.eih_rep_max = max(self.eih_rep_max, rep)
+        if p: p.lap("pick_pnp_gate")
 
         p_body = R_bc @ best + t_bc # 좌표 변환 및 발행
         self.pub_eih.publish(Float32MultiArray(
             data=pack_eih_marker(p_body[0], p_body[1], p_body[2], True,
                                   self._marker_body_yaw(rvec, R_bc))))
+        if p:
+            p.lap("publish")
+            p.note += f";pick=ok;rep={rep:.2f}"
 
         # 2초마다 진단 
         self.eih_hit += 1

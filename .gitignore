@@ -12,3 +12,6 @@ __pycache__/
 
 # 내부 인수인계 문서 — 로컬에만 둔다(공개 레포에 올리지 않음)
 HANDOFF_JETSON.md
+
+# 측정 로그(타이밍 CSV, rosbag) — 로컬 전용
+logs/

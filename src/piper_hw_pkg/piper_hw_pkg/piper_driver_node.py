@@ -7,6 +7,7 @@ except Exception:
 
 import math
 import time
+from collections import deque
 import numpy as np
 
 import rclpy
@@ -21,6 +22,7 @@ from step22_common import (
     quat_from_two_vec, _quat_mul, _quat_axis_angle, _quat_to_R,
     unpack_joint_hold_target,
 )
+from loop_profiler import declare_profile
 
 try:
     from piper_sdk import C_PiperInterface_V2, ArmMsgFeedbackStatusEnum
@@ -49,6 +51,11 @@ CARTESIAN_PHASES = ("hover", "pre", "grasp", "lift", "place_lower",
 
 
 FAULT_CODES = {1, 2, 3, 4, 7}
+
+MODE_RESEND_TICKS = 30      # 피드백 모드가 다르면 MotionCtrl_2를 0.5초마다 재전송
+STALL_TICKS = 30            # 관절 목표 미도달 + 0.5초간 정지면 같은 JointCtrl 재전송(첫 명령 유실 대비)
+STALL_ERR_DEG = 1.0
+STALL_MOVE_DEG = 0.2
 
 # ── 조정 파라미터 끝 ─────────────────────────────────────────────────────────
 
@@ -118,9 +125,12 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
         self.joint_hold_target = np.array(SEARCH_Q, float)
         self.cartesian_target = None
         self._last_move_mode = None  # ModeCtrl 중복호출 방지(CAN 트래픽 절약)
+        self._mode_sent_tick = 0
         self._last_endpose = None
         self._last_jointctrl = None
-        self._cmd_sent = 0; self._cmd_skipped = 0
+        self._jointctrl_tick = 0
+        self._q_hist = deque(maxlen=STALL_TICKS + 1)  # 최근 관절각[deg] — 정지 판정용
+        self._cmd_sent = 0; self._cmd_skipped = 0; self._cmd_resent = 0; self._mode_waits = 0
         self._fault_latched = False
 
         self.piper = None
@@ -157,7 +167,9 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
         self.create_subscription(Float32MultiArray, "/piper/gripper_target_cmd", self._on_gripper_target, 10)
 
         self._tick_n = 0
-        self.create_timer(1.0 / TICK_HZ, self._tick)
+        self._prof = declare_profile(self)
+        self._prof_tick = self._prof.loop("tick") if self._prof else None
+        self.create_timer(1.0 / TICK_HZ, self._tick_profiled if self._prof else self._tick)
         self.create_timer(5.0, self._publish_cmd_stats)
         self.get_logger().info(f"piper_driver_node 초기화 완료 (can={can_name}, really_enable={self.really_enable})")
 
@@ -168,6 +180,7 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
         if phase != self.arm_phase:
             self._last_endpose = None
             self._last_jointctrl = None
+            self.cartesian_target = None  # 이전 phase 목표가 새 phase 자세로 나가지 않게(10-01 place_hover 사고)
         self.arm_phase = phase
 
     def _on_cart_target(self, msg: Point):  # 직교 목표점 수신 — CARTESIAN_PHASES에서 MOVE L로 나간다
@@ -183,15 +196,27 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
         self.piper.GripperCtrl(round(angle_mm * 1000), round(effort_nm * 1000), 0x01, 0)
 
     # ── 60Hz 틱 ─────────────────────────────────────────────────────────────
+    def _tick_profiled(self):  # profile:=true일 때만 쓰는 _tick 래퍼. note에 phase/틱번호/송신여부
+        p = self._prof_tick
+        p.begin()
+        sent0 = self._cmd_sent
+        self._tick()
+        p.note = f"{self.arm_phase};tick={self._tick_n};sent={int(self._cmd_sent != sent0)}"
+        p.end()
+
     def _tick(self):  # 60Hz 심장박동 — 피드백 발행 → fault 확인 → phase별 모션 명령
         self._tick_n += 1
         self.pub_tick.publish(Int32(data=self._tick_n))
         if self.piper is None:
             return
+        p = self._prof_tick
 
         self._publish_feedback()
+        if p: p.lap("feedback")
 
-        st = self.piper.GetArmStatus().arm_status.arm_status  # 바깥 arm_status는 래퍼, 진짜 상태값은 한 겹 더 안에 있음
+        arm_st = self.piper.GetArmStatus().arm_status  # 바깥 arm_status는 래퍼, 진짜 상태값은 한 겹 더 안에 있음
+        st = arm_st.arm_status
+        if p: p.lap("status")
         if int(st) in FAULT_CODES:
             if not self._fault_latched:
                 self.get_logger().error(f"★ 팔 고장/이상 상태 감지(arm_status={st}) — 새 모션 명령 중단")
@@ -203,17 +228,25 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
             return
 
         if self.arm_phase in JOINT_HOLD_PHASES:
-            self._send_move_mode(0x01)  # MOVE J
+            if not self._ensure_move_mode(0x01, arm_st):  # MOVE J 전환 전 명령은 펌웨어가 버린다(10-01 실측)
+                return
             q_deg = np.degrees(self.joint_hold_target)
             cmd = tuple(round(v * 1000) for v in q_deg)
             if cmd != self._last_jointctrl:
                 self._last_jointctrl = cmd
+                self._jointctrl_tick = self._tick_n
                 self._cmd_sent += 1
+                self.piper.JointCtrl(*cmd)
+            elif self._joint_stalled(q_deg):
+                self._jointctrl_tick = self._tick_n
+                self._cmd_resent += 1
+                self.get_logger().warn(f"관절 목표 미도달·정지 감지 — JointCtrl 재전송 (phase={self.arm_phase})")
                 self.piper.JointCtrl(*cmd)
             else:
                 self._cmd_skipped += 1
         elif self.arm_phase in CARTESIAN_PHASES and self.cartesian_target is not None:
-            self._send_move_mode(0x02)  # MOVE L
+            if not self._ensure_move_mode(0x02, arm_st):  # MOVE L
+                return
             rx, ry, rz_body = self._rpy_by_phase[self.arm_phase]
             rz = rz_body - ARM_BASE_YAW_DEG  # yaw도 XY와 같은 회전보정을 받아야 한다
             x_body, y_body, z = self.cartesian_target
@@ -226,17 +259,30 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
                 self.piper.EndPoseCtrl(*cmd)
             else:
                 self._cmd_skipped += 1
+        if p: p.lap("cmd")
 
     def _publish_cmd_stats(self):  # 5초마다 전송/중복생략 횟수 로그 — 명령이 실제로 나가는지 확인용
         self.get_logger().info(
-            f"모션명령 전송 {self._cmd_sent}회 / 중복생략 {self._cmd_skipped}회 "
-            f"(phase={self.arm_phase})")
+            f"모션명령 전송 {self._cmd_sent}회 / 중복생략 {self._cmd_skipped}회 / "
+            f"재전송 {self._cmd_resent}회 / 모드대기 {self._mode_waits}틱 (phase={self.arm_phase})")
 
-    def _send_move_mode(self, move_mode):  # MOVE J/L 모드 전환. 같은 모드면 CAN 트래픽을 아낀다
-        if self._last_move_mode == move_mode:
-            return
-        self.piper.MotionCtrl_2(0x01, move_mode, self.move_spd, 0x00)
-        self._last_move_mode = move_mode
+    def _ensure_move_mode(self, move_mode, arm_st):  # 피드백이 CAN_CTRL+해당 모드면 True. 아니면 MotionCtrl_2 (재)전송 후 False
+        if int(arm_st.ctrl_mode) == 0x01 and int(arm_st.mode_feed) == move_mode:
+            self._last_move_mode = move_mode
+            return True
+        self._mode_waits += 1
+        if self._last_move_mode != move_mode or self._tick_n - self._mode_sent_tick >= MODE_RESEND_TICKS:
+            self.piper.MotionCtrl_2(0x01, move_mode, self.move_spd, 0x00)
+            self._last_move_mode = move_mode
+            self._mode_sent_tick = self._tick_n
+        return False
+
+    def _joint_stalled(self, q_target_deg):  # 목표와 1° 이상 차이 + 0.5초간 거의 안 움직임 + 직전 송신 후 0.5초 경과
+        if len(self._q_hist) <= STALL_TICKS or self._tick_n - self._jointctrl_tick < STALL_TICKS:
+            return False
+        q_now, q_old = self._q_hist[-1], self._q_hist[0]
+        return (np.max(np.abs(q_now - q_target_deg)) > STALL_ERR_DEG
+                and np.max(np.abs(q_now - q_old)) < STALL_MOVE_DEG)
 
     def _publish_feedback(self):  # 팔의 엔드포즈·관절각·그리퍼 상태를 ROS 토픽으로 중계
         ep = self.piper.GetArmEndPoseMsgs().end_pose
@@ -250,6 +296,11 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.name = list(PIPER_JOINT_NAMES)
         msg.position = [math.radians(v / 1000.0) for v in deg]
+        self._q_hist.append(np.array(deg) / 1000.0)
+        hs = self.piper.GetArmHighSpdInfoMsgs()
+        motors = [hs.motor_1, hs.motor_2, hs.motor_3, hs.motor_4, hs.motor_5, hs.motor_6]
+        msg.velocity = [m.motor_speed / 1000.0 for m in motors]  # [rad/s] 0.001rad/s → SI. 관절축(위치미분 대비 비 0.89, 10-01 실측)
+        msg.effort = [m.effort / 1000.0 for m in motors]  # [N·m] SDK가 전류×고정계수로 환산한 추정 토크
         self.pub_joint_states.publish(msg)
 
         gs = self.piper.GetArmGripperMsgs().gripper_state

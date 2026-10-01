@@ -1,3 +1,5 @@
+import time
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
@@ -26,6 +28,9 @@ def generate_launch_description():
     debug_view = LaunchConfiguration("debug_view")
     arm = LaunchConfiguration("arm")
     debug_view_topic = LaunchConfiguration("debug_view_topic")
+    # 타이밍 계측 — 네 노드가 같은 logs/<시각>_<tag>/ 에 CSV를 떨군다
+    prof = {"profile": LaunchConfiguration("profile"),
+            "profile_run": [time.strftime("%Y%m%d_%H%M%S_"), LaunchConfiguration("profile_tag")]}
 
     return LaunchDescription([
         DeclareLaunchArgument("really_enable", default_value="false",
@@ -141,6 +146,10 @@ def generate_launch_description():
                               description="true면 rqt_image_view를 같이 띄운다"),
         # 원본 프레임만 보고 싶으면 /vision/eih_image(카메라 노드가 그대로 발행하는 것)로 바꿀 것.
         DeclareLaunchArgument("debug_view_topic", default_value="/vision/eih_debug_image"),
+        DeclareLaunchArgument("profile", default_value="false",
+                              description="true면 driver/arm/vision/camera 루프 타이밍을 CSV로 기록"),
+        DeclareLaunchArgument("profile_tag", default_value="run",
+                              description="조도 등 측정 조건 이름 (예: bright, dark, backlight)"),
 
         Node(package="robot_state_publisher", executable="robot_state_publisher",
              parameters=[{"robot_description": robot_description}]),
@@ -148,7 +157,7 @@ def generate_launch_description():
         Node(package="piper_hw_pkg", executable="piper_driver_node",
              parameters=[{"really_enable": really_enable, "can_name": can_name,
                           "move_spd_rate_ctrl": move_spd_rate_ctrl,
-                          "place_pitch_deg": LaunchConfiguration("place_pitch_deg")}],
+                          "place_pitch_deg": LaunchConfiguration("place_pitch_deg"), **prof}],
              output="screen"),
         Node(package="piper_hw_pkg", executable="piper_gripper_node", output="screen"),
         Node(package="piper_hw_pkg", executable="piper_eih_camera_node",
@@ -156,7 +165,8 @@ def generate_launch_description():
                           "cam_tcp_offset_y": LaunchConfiguration("cam_tcp_offset_y"),
                           "cam_tcp_offset_z": LaunchConfiguration("cam_tcp_offset_z"),
                           "cam_tcp_offset_pitch_deg": LaunchConfiguration("cam_tcp_offset_pitch_deg"),
-                          "cam_tcp_offset_roll_deg": LaunchConfiguration("cam_tcp_offset_roll_deg")}],
+                          "cam_tcp_offset_roll_deg": LaunchConfiguration("cam_tcp_offset_roll_deg"),
+                          **prof}],
              output="screen"),
         Node(package="piper_hw_pkg", executable="piper_fake_amr_node", output="screen"),
 
@@ -168,7 +178,7 @@ def generate_launch_description():
                           "eih_reproj_max_px": LaunchConfiguration("eih_reproj_max_px"),
                           "eih_reproj_max_rel": LaunchConfiguration("eih_reproj_max_rel"),
                           "corner_refine": corner_refine,
-                          "eih_debug_view": debug_view}],
+                          "eih_debug_view": debug_view, **prof}],
              output="screen"),
         Node(package="rqt_image_view", executable="rqt_image_view",
              arguments=[debug_view_topic],
@@ -211,6 +221,6 @@ def generate_launch_description():
                           "place_expected_x_body": LaunchConfiguration("place_expected_x_body"),
                           "place_expected_y_body": LaunchConfiguration("place_expected_y_body"),
                           "place_expected_z_body": LaunchConfiguration("place_expected_z_body"),
-                          "step_confirm": step_confirm}],
+                          "step_confirm": step_confirm, **prof}],
              output="screen"),
     ])
