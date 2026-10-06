@@ -42,12 +42,12 @@ TICK_HZ = 60.0                  # 900스텝=15초
 GRASP_ROLL_DEG = -90.0
 
 
-JOINT_HOLD_PHASES = ("wait", "place_ready", "place_home", "place_done")
+JOINT_HOLD_PHASES = ("wait", "place_ready", "place_home", "place_done", "traj_joint")  # traj_*: traj_test_node 전용
 PLACE_MARKER_PHASES = ("place_hover", "place_detect", "place_descend",
                        "place_release", "place_retreat")
 CARTESIAN_PHASES = ("hover", "pre", "grasp", "lift", "place_lower",
                      "place_hover", "place_detect", "place_descend",
-                     "place_release", "place_retreat")
+                     "place_release", "place_retreat", "traj_cart")
 
 
 FAULT_CODES = {1, 2, 3, 4, 7}
@@ -109,6 +109,7 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
         self.declare_parameter("enable_arm_motion", ENABLE_ARM_MOTION_DEFAULT)
         self.declare_parameter("move_spd_rate_ctrl", MOVE_SPD_RATE_DEFAULT)
         self.declare_parameter("place_pitch_deg", PLACE_PITCH_DEG)
+        self.declare_parameter("initial_phase", "wait")  # 'idle'이면 지시 전까지 모션 명령 없음(traj_test용)
         can_name = self.get_parameter("can_name").value
         self.really_enable = bool(self.get_parameter("really_enable").value)
         self.enable_arm_motion = bool(self.get_parameter("enable_arm_motion").value)
@@ -121,9 +122,10 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
         quat_by_phase["hover"] = hover_q
         self._rpy_by_phase = {ph: _quat_to_rpy_deg(q) for ph, q in quat_by_phase.items()}
 
-        self.arm_phase = "wait"
+        self.arm_phase = str(self.get_parameter("initial_phase").value)
         self.joint_hold_target = np.array(SEARCH_Q, float)
         self.cartesian_target = None
+        self.traj_cart_pose = None  # traj_cart 전용 [x,y,z body m, rx,ry,rz native deg]
         self._last_move_mode = None  # ModeCtrl 중복호출 방지(CAN 트래픽 절약)
         self._mode_sent_tick = 0
         self._last_endpose = None
@@ -157,12 +159,14 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
                     "실제로 움직이려면 파라미터 really_enable:=true 로 재기동할 것.")
 
         self.pub_ee_pose = self.create_publisher(Point, "/arm/ee_pose_body", 10)
+        self.pub_ee_native = self.create_publisher(Float32MultiArray, "/arm/ee_pose_native", 10)  # [x,y,z m, rx,ry,rz deg]
         self.pub_joint_states = self.create_publisher(JointState, "/joint_states", 10)
         self.pub_tick = self.create_publisher(Int32, "/plant/tick", 20)
         self.pub_gripper_feedback = self.create_publisher(Float32MultiArray, "/piper/gripper_feedback", 10)
 
         self.create_subscription(String, "/arm/status", self._on_arm_status, 10)
         self.create_subscription(Point, "/arm/cartesian_target", self._on_cart_target, 10)
+        self.create_subscription(Float32MultiArray, "/arm/traj_cart_pose", self._on_traj_cart_pose, 10)
         self.create_subscription(Float32MultiArray, "/arm/joint_hold_target", self._on_joint_hold, 10)
         self.create_subscription(Float32MultiArray, "/piper/gripper_target_cmd", self._on_gripper_target, 10)
 
@@ -181,10 +185,15 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
             self._last_endpose = None
             self._last_jointctrl = None
             self.cartesian_target = None  # 이전 phase 목표가 새 phase 자세로 나가지 않게(10-01 place_hover 사고)
+            self.traj_cart_pose = None
         self.arm_phase = phase
 
     def _on_cart_target(self, msg: Point):  # 직교 목표점 수신 — CARTESIAN_PHASES에서 MOVE L로 나간다
         self.cartesian_target = np.array([msg.x, msg.y, msg.z], float)
+
+    def _on_traj_cart_pose(self, msg: Float32MultiArray):  # traj_cart 목표(위치+자세) — 자세를 phase 고정값 대신 쓴다
+        self.traj_cart_pose = np.array(msg.data, float)
+        self.cartesian_target = self.traj_cart_pose[:3].copy()
 
     def _on_joint_hold(self, msg: Float32MultiArray):  # 관절 목표 수신 — JOINT_HOLD_PHASES에서 MOVE J로 나간다
         self.joint_hold_target = unpack_joint_hold_target(msg.data)
@@ -247,8 +256,11 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
         elif self.arm_phase in CARTESIAN_PHASES and self.cartesian_target is not None:
             if not self._ensure_move_mode(0x02, arm_st):  # MOVE L
                 return
-            rx, ry, rz_body = self._rpy_by_phase[self.arm_phase]
-            rz = rz_body - ARM_BASE_YAW_DEG  # yaw도 XY와 같은 회전보정을 받아야 한다
+            if self.arm_phase == "traj_cart" and self.traj_cart_pose is not None:
+                rx, ry, rz = self.traj_cart_pose[3:]  # 이미 native 기준
+            else:
+                rx, ry, rz_body = self._rpy_by_phase[self.arm_phase]
+                rz = rz_body - ARM_BASE_YAW_DEG  # yaw도 XY와 같은 회전보정을 받아야 한다
             x_body, y_body, z = self.cartesian_target
             x, y = _body_to_native_xy(x_body, y_body)
             cmd = (round(x * 1_000_000), round(y * 1_000_000), round(z * 1_000_000),
@@ -289,6 +301,9 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
         x_body, y_body = _native_to_body_xy(ep.X_axis / 1_000_000.0, ep.Y_axis / 1_000_000.0)
         self.pub_ee_pose.publish(Point(
             x=x_body, y=y_body, z=ep.Z_axis / 1_000_000.0))
+        self.pub_ee_native.publish(Float32MultiArray(data=[
+            ep.X_axis / 1e6, ep.Y_axis / 1e6, ep.Z_axis / 1e6,
+            ep.RX_axis / 1e3, ep.RY_axis / 1e3, ep.RZ_axis / 1e3]))
 
         js = self.piper.GetArmJointMsgs().joint_state
         deg = [js.joint_1, js.joint_2, js.joint_3, js.joint_4, js.joint_5, js.joint_6]

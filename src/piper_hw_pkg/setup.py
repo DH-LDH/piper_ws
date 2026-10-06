@@ -12,7 +12,7 @@ setup(
         ("share/" + package_name, ["package.xml"]),
         ("share/" + package_name + "/launch",
          ["launch/piper_real.launch.py", "launch/eih_debug_view.launch.py",
-          "launch/rsp_only.launch.py"]),
+          "launch/rsp_only.launch.py", "launch/traj_test.launch.py"]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
