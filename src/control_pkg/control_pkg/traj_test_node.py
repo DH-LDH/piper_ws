@@ -20,6 +20,7 @@ import numpy as np
 import yaml
 import rclpy
 from rclpy.node import Node
+from rcl_interfaces.msg import ParameterDescriptor
 from std_msgs.msg import Float32MultiArray, String, Int32, Bool
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from sensor_msgs.msg import JointState
@@ -51,7 +52,8 @@ class TrajTestNode(Node):
         super().__init__("traj_test_node")
         from ament_index_python.packages import get_package_share_directory
         default_wp = os.path.join(get_package_share_directory("control_pkg"), "config", "traj_waypoints.yaml")
-        P = lambda n, v: self.declare_parameter(n, v).value
+        dyn = ParameterDescriptor(dynamic_typing=True)  # launch에서 '5'처럼 정수로 넘겨도 실수 파라미터로 받게
+        P = lambda n, v: self.declare_parameter(n, v, dyn).value
         self.wp_file = P("waypoints_file", default_wp)
         self.set_name = P("set", "line")
         self.mode = P("mode", "joint_direct")
@@ -64,6 +66,7 @@ class TrajTestNode(Node):
         self.dry_run = bool(P("dry_run", True))
         self.repeat = int(P("repeat", 1))
         self.confirm = bool(P("confirm", True))  # 시작점 도착 후 step_confirm.py(Enter) 승인을 받고 실행
+        self.start_delay = float(P("start_delay", 0.0))  # confirm=false일 때 시작점 도착 후 대기[s] — 혼자 촬영할 때
         self._confirmed = False
 
         self.kin = K.PiperKin()
@@ -223,11 +226,24 @@ class TrajTestNode(Node):
                     self.state = "wait_confirm"; self._confirmed = False
                     self.pub_step_wait.publish(String(data=f"traj {self.set_name}/{self.mode}"))
                     self.get_logger().warn("★ 실행 대기 — 다른 터미널의 step_confirm.py에서 Enter를 누르면 궤적을 실행합니다")
+                elif self.start_delay > 0:
+                    self.state = "countdown"; self.t_state = time.time(); self._last_cd = None
+                    self.get_logger().warn(f"★ {self.start_delay:.0f}초 뒤 궤적 실행 — 멈추려면 Ctrl-C")
                 else:
                     self._start_run()
             elif time.time() - self.t_state > START_TIMEOUT_S:
                 self.get_logger().error(f"시작 자세 도달 실패(잔여 {err:.2f}°) — 중단"); self.state = "done"
                 self.finished = True
+        elif st == "countdown":  # 시작점 유지하며 start_delay 초 대기 후 자동 실행
+            self._status("traj_joint")
+            self.pub_joint.publish(Float32MultiArray(data=pack_joint_hold_target(self.plan["q"][0])))
+            self._log_row("goto", self.plan["q"][0], None, None, False)
+            left = int(math.ceil(self.start_delay - (time.time() - self.t_state)))
+            if left != self._last_cd and left > 0:
+                self._last_cd = left
+                self.get_logger().info(f"  {left}…")
+            if left <= 0:
+                self._start_run()
         elif st == "wait_confirm":  # 시작점 유지하며 승인 대기
             self._status("traj_joint")
             self.pub_joint.publish(Float32MultiArray(data=pack_joint_hold_target(self.plan["q"][0])))
