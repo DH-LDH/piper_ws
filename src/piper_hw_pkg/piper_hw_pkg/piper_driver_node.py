@@ -56,6 +56,8 @@ MODE_RESEND_TICKS = 30      # 피드백 모드가 다르면 MotionCtrl_2를 0.5�
 STALL_TICKS = 30            # 관절 목표 미도달 + 0.5초간 정지면 같은 JointCtrl 재전송(첫 명령 유실 대비)
 STALL_ERR_DEG = 1.0
 STALL_MOVE_DEG = 0.2
+MOTOR_OFF_GRACE_S = 0.5     # Enable 요청 중 모터가 이만큼 연속으로 꺼져 있으면 모션 명령 중단(10-06 튐 이후 자체 비활성 사례)
+LOWSPD_STALE_S = 0.5        # 저속 피드백(Enable 상태)이 이보다 오래 안 오면 판단 보류 — 오경보로 시퀀스를 막지 않게
 
 # ── 조정 파라미터 끝 ─────────────────────────────────────────────────────────
 
@@ -134,6 +136,8 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
         self._q_hist = deque(maxlen=STALL_TICKS + 1)  # 최근 관절각[deg] — 정지 판정용
         self._cmd_sent = 0; self._cmd_skipped = 0; self._cmd_resent = 0; self._mode_waits = 0
         self._fault_latched = False
+        self._motor_off_since = None; self._motor_blocked = False; self._motor_off_ticks = 0
+        self._lowspd_stale_warned = False
 
         self.piper = None
         if C_PiperInterface_V2 is None:
@@ -235,6 +239,9 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
 
         if not self.really_enable or not self.enable_arm_motion:
             return
+        if self._motors_disabled():
+            self._motor_off_ticks += 1
+            return
 
         if self.arm_phase in JOINT_HOLD_PHASES:
             if not self._ensure_move_mode(0x01, arm_st):  # MOVE J 전환 전 명령은 펌웨어가 버린다(10-01 실측)
@@ -276,7 +283,8 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
     def _publish_cmd_stats(self):  # 5초마다 전송/중복생략 횟수 로그 — 명령이 실제로 나가는지 확인용
         self.get_logger().info(
             f"모션명령 전송 {self._cmd_sent}회 / 중복생략 {self._cmd_skipped}회 / "
-            f"재전송 {self._cmd_resent}회 / 모드대기 {self._mode_waits}틱 (phase={self.arm_phase})")
+            f"재전송 {self._cmd_resent}회 / 모드대기 {self._mode_waits}틱 / 모터비활성 {self._motor_off_ticks}틱 "
+            f"(phase={self.arm_phase})")
 
     def _ensure_move_mode(self, move_mode, arm_st):  # 피드백이 CAN_CTRL+해당 모드면 True. 아니면 MotionCtrl_2 (재)전송 후 False
         if int(arm_st.ctrl_mode) == 0x01 and int(arm_st.mode_feed) == move_mode:
@@ -284,10 +292,36 @@ class PiperDriverNode(Node):  # CAN 브릿지 — ROS 목표를 PiPER SDK 명령
             return True
         self._mode_waits += 1
         if self._last_move_mode != move_mode or self._tick_n - self._mode_sent_tick >= MODE_RESEND_TICKS:
-            self.piper.MotionCtrl_2(0x01, move_mode, self.move_spd, 0x00)
+            self.piper.MotionCtrl_2(0x01, move_mode, self.move_spd, 0x00)  # 0xAD(고속 추종)는 진입 시 튐·정확도 저하로 기각(10-06)
             self._last_move_mode = move_mode
             self._mode_sent_tick = self._tick_n
         return False
+
+    def _motors_disabled(self):  # 모터가 MOTOR_OFF_GRACE_S 이상 꺼져 있으면 True(명령 중단). 피드백이 끊기면 False(판단 보류)
+        ls = self.piper.GetArmLowSpdInfoMsgs()
+        if time.time() - ls.time_stamp > LOWSPD_STALE_S:
+            if not self._lowspd_stale_warned:
+                self.get_logger().warn("저속 피드백(모터 Enable 상태) 수신 끊김 — 모터 상태 판단 보류, 명령은 계속")
+                self._lowspd_stale_warned = True
+            return False
+        self._lowspd_stale_warned = False
+        off = [j for j in range(1, 7) if not getattr(ls, f"motor_{j}").foc_status.driver_enable_status]
+        if not off:
+            if self._motor_blocked:
+                self.get_logger().warn("모터 활성 복귀 — 모션 명령 재개")
+                self._last_endpose = None; self._last_jointctrl = None  # 같은 목표도 다시 보내게
+                self._motor_blocked = False
+            self._motor_off_since = None
+            return False
+        if self._motor_off_since is None:
+            self._motor_off_since = time.time()
+        if time.time() - self._motor_off_since < MOTOR_OFF_GRACE_S:
+            return False
+        if not self._motor_blocked:
+            self.get_logger().error(f"★ 모터 비활성 (J{off}) {MOTOR_OFF_GRACE_S:.1f}s 이상 — 모션 명령 중단. "
+                                    f"팔을 받치고 재실행할 것(필요하면 clear_arm_fault.py)")
+            self._motor_blocked = True
+        return True
 
     def _joint_stalled(self, q_target_deg):  # 목표와 1° 이상 차이 + 0.5초간 거의 안 움직임 + 직전 송신 후 0.5초 경과
         if len(self._q_hist) <= STALL_TICKS or self._tick_n - self._jointctrl_tick < STALL_TICKS:

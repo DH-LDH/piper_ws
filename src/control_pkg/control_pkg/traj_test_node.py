@@ -63,6 +63,7 @@ class TrajTestNode(Node):
         self.rot_w_max = float(P("rot_w_max", 0.3))      # [rad/s] 자세 회전 최고속도
         self.movel_speed = float(P("movel_speed", 0.02))  # [m/s] movel 목표 전진속도 — 펌웨어 5%(≈21 mm/s)와 맞춰 스트리밍이 끝까지 지속되게
         self.max_step_deg = float(P("max_step_deg", 0.6))  # 틱당 관절 변화 상한(60Hz면 36°/s)
+        self.goto_w = float(P("goto_w", 0.15))  # [rad/s] 시작점 이동 관절 최고속도 — 고속 추종 모드에서도 이 속도로 스트리밍
         self.dry_run = bool(P("dry_run", True))
         self.repeat = int(P("repeat", 1))
         self.confirm = bool(P("confirm", True))  # 시작점 도착 후 step_confirm.py(Enter) 승인을 받고 실행
@@ -212,9 +213,19 @@ class TrajTestNode(Node):
             self._log_row("fk", None, None, None, False)
         elif st == "wait_fb":
             if self.q_meas is not None:
+                self._goto = self._plan_goto(self.q_meas.copy(), self.plan["q"][0])
+                self._q_sent = self.q_meas.copy(); self.k = 0; self.state = "goto_stream"
+                self.get_logger().info(f"시작 자세로 이동(관절 최고 {self.goto_w} rad/s, {len(self._goto)/TICK_HZ:.1f} s): "
+                                       f"{np.degrees(self.plan['q'][0]).round(1)}°")
+        elif st == "goto_stream":  # 현재 자세 → 시작점 최소저크 스트리밍(한 번에 큰 목표를 보내지 않음)
+            q = self._goto[min(self.k, len(self._goto) - 1)]
+            self._status("traj_joint")
+            self.pub_joint.publish(Float32MultiArray(data=pack_joint_hold_target(self._clamp_step(q))))
+            self._log_row("goto", q, None, None, True)
+            self.k += 1
+            if self.k >= len(self._goto):
                 self.state = "goto_start"; self.t_state = time.time()
-                self.get_logger().info(f"시작 자세로 MOVE J: {np.degrees(self.plan['q'][0]).round(1)}°")
-        elif st == "goto_start":  # 첫 점으로 한 번에 MOVE J, 도달·정지 확인
+        elif st == "goto_start":  # 시작점 유지, 도달·정지 확인
             q0 = self.plan["q"][0]
             self._status("traj_joint")
             self.pub_joint.publish(Float32MultiArray(data=pack_joint_hold_target(q0)))
@@ -289,11 +300,20 @@ class TrajTestNode(Node):
                 if hasattr(self, "t_arrive"):
                     del self.t_arrive
                 if self.run_n < self.repeat:
-                    self.state = "goto_start"; self.t_state = time.time()
+                    self.state = "wait_fb"  # 다음 반복도 시작점까지 스트리밍으로 복귀
                 else:
                     self.get_logger().info(f"완료 → {self.log_dir}/traj.csv"); self.state = "done"
                     self._f.flush()
                     self.finished = True
+
+    def _plan_goto(self, qa, qb):  # 관절공간 최소저크, 관절 최고속도 goto_w
+        d = float(np.max(np.abs(qb - qa)))
+        T = max(1.875 * d / self.goto_w, 0.5)
+        s = min_jerk(np.arange(0, T + 1.0 / TICK_HZ, 1.0 / TICK_HZ) / T)
+        g = qa + np.outer(s, qb - qa)
+        if np.degrees(np.abs(np.diff(g, axis=0))).max(initial=0) > self.max_step_deg:
+            raise RuntimeError("시작점 이동 궤적이 틱당 변화 한계를 넘음 — goto_w를 낮출 것")
+        return g
 
     def _start_run(self):
         self.state = "run"; self.k = 0; self.run_n = getattr(self, "run_n", 0) + 1

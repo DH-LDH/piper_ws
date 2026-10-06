@@ -23,7 +23,7 @@ def generate_launch_description():
                              "v_max": L("v_max"), "w_max": L("w_max"), "rot_w_max": L("rot_w_max"),
                              "movel_speed": L("movel_speed"), "max_step_deg": L("max_step_deg"),
                              "repeat": L("repeat"), "dry_run": L("dry_run"), "confirm": L("confirm"),
-                             "start_delay": L("start_delay")}])
+                             "start_delay": L("start_delay"), "goto_w": L("goto_w")}])
 
     return LaunchDescription([
         DeclareLaunchArgument("really_enable", default_value="false"),
@@ -43,6 +43,7 @@ def generate_launch_description():
         DeclareLaunchArgument("dry_run", default_value="true", description="false여야 실제 명령을 보낸다"),
         DeclareLaunchArgument("confirm", default_value="true",
                               description="true면 시작점 도착 후 step_confirm.py Enter를 기다렸다가 실행"),
+        DeclareLaunchArgument("goto_w", default_value="0.15", description="시작점 이동 관절 최고속도[rad/s]"),
         DeclareLaunchArgument("start_delay", default_value="0",
                               description="confirm:=false일 때 시작점 도착 후 자동 실행까지 대기[s]"),
 
