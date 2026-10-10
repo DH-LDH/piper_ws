@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bag 구간 → EE 위치(x 지령/실측) + 축별 속도 v_x, v_y, v_z + 합성 |v_EE| 그림과 구간별 수치.
+"""bag 구간 → EE 위치 x, y, z(지령/실측) + 합성 |v_EE| 그림과 구간별 수치. --vel이면 축별 속도도 그린다.
 
 사용: python3 tools/plot_bag_xyz.py logs/bags/<bag> --t 77 92 --hl 78.5 85 --after 85.5 89 --out docs/img/a_zoom_place_descend_xyz.png
 좌표: /arm/ee_pose_body(body_link), 속도: 5샘플 이동평균 후 중앙차분(plot_run.deriv)
@@ -30,6 +30,7 @@ def main():
     ap.add_argument("--t", nargs=2, type=float, required=True)   # 그릴 구간 [s, bag 시작 기준]
     ap.add_argument("--hl", nargs=2, type=float, default=None)   # 음영 구간(목표 갱신 중)
     ap.add_argument("--after", nargs=2, type=float, default=None)  # 비교 구간(목표 멈춘 뒤)
+    ap.add_argument("--vel", action="store_true")  # 축별 속도 v_x, v_y, v_z 줄 추가
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     _font()
@@ -48,19 +49,22 @@ def main():
     if a.after:
         stats("비교 구간", v, vn, (te >= a.after[0]) & (te < a.after[1]))
 
-    fig, axs = plt.subplots(5, 1, figsize=(11, 11), sharex=True)
-    axs[0].plot(tc[kc], pc[kc, 0], ".", ms=2, color="tab:orange", label="cmd x")
-    axs[0].plot(te[k], pe[k, 0], color="tab:red", lw=1, label="actual x")
-    axs[0].set_ylabel("x [mm]"); axs[0].legend(fontsize=8)
-    for i, (n, c) in enumerate(zip("xyz", ("tab:red", "tab:green", "tab:blue"))):
-        axs[i + 1].plot(te[k], v[k, i], color=c, lw=0.8); axs[i + 1].set_ylabel(f"v_{n} [mm/s]")
-    axs[4].plot(te[k], vn[k], color="k", lw=0.8); axs[4].set_ylabel("|v_EE| [mm/s]\n(=√(vx²+vy²+vz²))")
-    axs[4].set_xlabel("t [s]")
+    C = ("tab:red", "tab:green", "tab:blue")
+    rows = 4 + (3 if a.vel else 0)
+    fig, axs = plt.subplots(rows, 1, figsize=(11, 2.2 * rows), sharex=True)
+    for i, n in enumerate("xyz"):
+        axs[i].plot(tc[kc], pc[kc, i], ".", ms=2, color="tab:orange", label=f"cmd {n}")
+        axs[i].plot(te[k], pe[k, i], color=C[i], lw=1, label=f"actual {n}")
+        axs[i].set_ylabel(f"{n} [mm]"); axs[i].legend(fontsize=8, loc="upper right")
+        if a.vel:
+            axs[3 + i].plot(te[k], v[k, i], color=C[i], lw=0.8); axs[3 + i].set_ylabel(f"v_{n} = d{n}/dt\n[mm/s]")
+    axs[-1].plot(te[k], vn[k], color="k", lw=0.8); axs[-1].set_ylabel("|v_EE| [mm/s]\n=√(vx²+vy²+vz²)")
+    axs[-1].set_xlabel("t [s]")
     for x in axs:
         x.grid(alpha=0.3)
         if a.hl:
             x.axvspan(*a.hl, color="tab:purple", alpha=0.07, lw=0)
-    fig.suptitle("EE 속도 축별 분해 (body_link 좌표, 60 Hz, 5샘플 이동평균 후 중앙차분)", fontsize=10)
+    fig.suptitle("EE 위치 x, y, z와 합성 속도 (body_link 좌표, 60 Hz, |v_EE|는 각 축 위치를 5샘플 이동평균 후 중앙차분해 합성)", fontsize=10)
     fig.tight_layout()
     fig.savefig(a.out, dpi=110)
     print("저장:", a.out)
