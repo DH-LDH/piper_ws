@@ -14,7 +14,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(__file__))
-from plot_run import read_bag, deriv
+from plot_run import read_bag, deriv, phase_segments
 from traj_analyze import _font, hp
 
 
@@ -49,11 +49,15 @@ def main():
     if a.after:
         stats("비교 구간", v, vn, (te >= a.after[0]) & (te < a.after[1]))
 
+    segs = [(t1 - t0, t2 - t0, ph) for t1, t2, ph in phase_segments(d["/arm/status"]) if t2 - t0 > a.t[0] and t1 - t0 < a.t[1]]
+    tcs, pcs = tc[kc], pc[kc].copy()
+    brk = np.where(np.diff(tcs) > 0.2)[0]  # 지령이 끊긴 곳은 선을 잇지 않는다
+    tcs, pcs = np.insert(tcs, brk + 1, np.nan), np.insert(pcs, brk + 1, np.nan, axis=0)
     C = ("tab:red", "tab:green", "tab:blue")
     rows = 4 + (3 if a.vel else 0)
     fig, axs = plt.subplots(rows, 1, figsize=(11, 2.2 * rows), sharex=True)
     for i, n in enumerate("xyz"):
-        axs[i].plot(tc[kc], pc[kc, i], ".", ms=2, color="tab:orange", label=f"cmd {n}")
+        axs[i].plot(tcs, pcs[:, i], color="tab:orange", lw=1.2, ls="--", label=f"cmd {n}")
         axs[i].plot(te[k], pe[k, i], color=C[i], lw=1, label=f"actual {n}")
         axs[i].set_ylabel(f"{n} [mm]"); axs[i].legend(fontsize=8, loc="upper right")
         if a.vel:
@@ -64,6 +68,14 @@ def main():
         x.grid(alpha=0.3)
         if a.hl:
             x.axvspan(*a.hl, color="tab:purple", alpha=0.07, lw=0)
+        for t1, _, _ in segs[1:]:
+            x.axvline(t1, color="0.5", lw=0.8, ls=":")
+    for t1, t2, ph in [g for g in segs if g[1] - g[0] > 0.3]:  # phase 이름(맨 위 칸), 짧은 phase는 생략
+        axs[0].text((max(t1, a.t[0]) + min(t2, a.t[1])) / 2, 1.02, ph, transform=axs[0].get_xaxis_transform(),
+                    ha="center", va="bottom", fontsize=8, color="0.3")
+    for i in brk:
+        axs[0].text((tc[kc][i] + tc[kc][i + 1]) / 2, 0.5, "지령 없음", transform=axs[0].get_xaxis_transform(),
+                    ha="center", fontsize=7, color="0.4", rotation=90)
     fig.suptitle("EE 위치 x, y, z와 합성 속도 (body_link 좌표, 60 Hz, |v_EE|는 각 축 위치를 5샘플 이동평균 후 중앙차분해 합성)", fontsize=10)
     fig.tight_layout()
     fig.savefig(a.out, dpi=110)
