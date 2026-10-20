@@ -11,7 +11,7 @@ from collections import defaultdict
 
 import numpy as np
 
-LOG_ROOT = os.environ.get("PIPER_LOG_DIR", os.path.expanduser("~/IsaacSim_ranger_piper/logs"))
+LOG_ROOT = os.environ.get("PIPER_LOG_DIR", os.path.expanduser("~/piper_ws/logs"))
 SUMMARY_SEC = 5.0
 
 

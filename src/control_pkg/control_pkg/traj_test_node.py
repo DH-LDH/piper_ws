@@ -39,7 +39,7 @@ START_TIMEOUT_S = 40.0
 ARRIVE_TOL_MM = 0.5                     # 궤적 끝 후 EE가 끝점 이 안에 0.5 s 머물면 도착
 ARRIVE_TIMEOUT_S = 20.0
 POST_ARRIVE_S = 1.0                     # 도착 후 추가 기록(잔류 흔들림)
-LOG_ROOT = os.environ.get("PIPER_LOG_DIR", os.path.expanduser("~/IsaacSim_ranger_piper/logs"))
+LOG_ROOT = os.environ.get("PIPER_LOG_DIR", os.path.expanduser("~/piper_ws/logs"))
 
 
 def min_jerk(tau):  # 최소저크 시간 스케일 s(τ), τ∈[0,1]
