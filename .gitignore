@@ -15,3 +15,4 @@ HANDOFF_JETSON.md
 
 # 측정 로그(타이밍 CSV, rosbag) — 로컬 전용
 logs/
+docs/papers/
