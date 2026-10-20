@@ -71,7 +71,8 @@ class Probe:
         self.spike_n = 0; self.spikes = 0
         self.tdc = None
         if a.tdc:  # 한 축 TDC(TDE + 극점 배치) — 체크리스트 2단계, 시험 관절은 펌웨어 Kp·Kd 0, 토크는 전부 우리 계산
-            self.kp[a.joint - 1] = 0.0; self.kd[a.joint - 1] = 0.0  # 나머지 관절은 --ext 없으면 펌웨어 PD로 고정(10-20 손목 튐 대비)
+            if not a.hybrid:  # 하이브리드는 시험 관절도 펌웨어 MIT PD 유지
+                self.kp[a.joint - 1] = 0.0; self.kd[a.joint - 1] = 0.0  # 나머지 관절은 --ext 없으면 펌웨어 PD로 고정(10-20 손목 튐 대비)
             if self.ext_kp is not None:
                 self.ext_kp[a.joint - 1] = 0.0
             if self.ext_kd is not None:
@@ -86,8 +87,10 @@ class Probe:
                         + list(eff.round(4)) + list(np.degrees(qref).round(4)) + list(np.round(tff, 4))
                         + list(st) + [int(en.all())])
 
-    def check(self, s, qref, phase, t_mit=None):  # 중단 사유 문자열 또는 None
+    def check(self, s, qref, phase, t_mit=None, vref=None):  # 중단 사유 문자열 또는 None
         q, qd, eff, en, st = s
+        if self.a.speed_err and vref is not None:
+            qd = qd - vref  # 빠른 사인파: 목표 속도와의 차로 판정
         if t_mit is not None and t_mit > MODE_GRACE_S and st[2] != 0x04:
             return f"모드 피드백 {st[2]} (MOVE M=4 아님)"
         dev = np.degrees(np.abs(q - qref))
@@ -138,8 +141,10 @@ class Probe:
         print(f"유지 자세 q[deg] {np.degrees(q_hold).round(2)}\nτ_ff[N·m] {tff.round(3)}\nKp(펌웨어) {self.kp} Kd {self.kd}"
               + (f"\nKp(우리 루프, τ_ff로) {self.ext_kp} — 상한 ±{TAU_CMD_LIMIT} N·m" if self.ext_kp is not None else "")
               + (f"\nKd(우리 루프, τ_ff로) {self.ext_kd}" if self.ext_kd is not None else "")
-              + (f"\nTDC J{a.joint}: M̄ {a.mbar}, Ks {a.ks}, Kg {a.kg} → 등가 Kp {a.mbar * a.ks * a.kg:.2f}, "
-                 f"Kd {a.mbar * (a.ks + a.kg):.3f}, q̈ 필터 {a.acc_fc} Hz"
+              + ((f"\n하이브리드 J{a.joint}: 펌웨어 PD Kp {self.kp[a.joint - 1]} Kd {self.kd[a.joint - 1]} + τ_ff(TDE, M̄ {a.mbar}), q̈ 필터 {a.acc_fc} Hz"
+                  if a.hybrid else
+                  f"\nTDC J{a.joint}: M̄ {a.mbar}, Ks {a.ks}, Kg {a.kg} → 등가 Kp {a.mbar * a.ks * a.kg:.2f}, "
+                  f"Kd {a.mbar * (a.ks + a.kg):.3f}, q̈ 필터 {a.acc_fc} Hz")
                  + (f" | 스위칭 K {a.sw_k} (최대 {a.mbar * a.sw_k:.3f} N·m), φ {a.sw_phi}" if a.sw_k and not a.asmc else "")
                  + (f" | SS-ASMC δ {a.delta}, ε̄ {a.eps}, γ {a.gamma}, a {a.a_exp}, η [{a.eta_lo}, {a.eta_hi}], μ̄ {a.mu}, "
                     f"K̂ 상한 {a.k_max} (M̄K̂ {a.mbar * a.k_max:.3f} N·m), " + (f"sat φ {a.sw_phi}" if a.sw_phi else "sgn")
@@ -163,6 +168,7 @@ class Probe:
         j6 = a.joint - 1
         reason = None
         tau_prev = tff[j6]; qd_prev = None; qdd_f = 0.0; t_prev = None
+        pd_fw_prev = 0.0
         k_hat = 0.0; eta = a.eta_lo  # SS-ASMC 스위칭 게인 K̂, 갱신 파라미터 η̂(하한에서 시작)
         sent = None; mm_t = np.zeros(6); t_last = None
         while True:
@@ -191,7 +197,11 @@ class Probe:
                 qd_prev = s[1][j6]; t_prev = now
                 e = qr[j6] - s[0][j6]; ed = vr[j6] - s[1][j6]
                 tde = tau_prev - a.mbar * qdd_f
-                pd = a.mbar * (ar + (a.ks + a.kg) * ed + a.ks * a.kg * e)
+                if a.hybrid:  # τ_ff = [τ_ff + 펌웨어 PD](t−L) − M̄q̈(t−L) + M̄q̈_d — PD는 드라이버가, 우리는 TDE 보정만(10-20 고정 PD는 매끈, TDC는 속도 변화에 강함)
+                    tde += pd_fw_prev
+                    pd = a.mbar * ar
+                else:
+                    pd = a.mbar * (ar + (a.ks + a.kg) * ed + a.ks * a.kg * e)
                 sv = ed + a.ks * e  # 논문 (6) s = ė + Ks·e
                 if a.asmc16:  # Baek·Jin·Han 2016 TIE 식 (11): |s| ≥ ε면 φ|s|/α로 증가, 작으면 −φα/|s|로 급감
                     th = 1.0 if abs(sv) - a.eps >= 0 else -1.0
@@ -229,12 +239,13 @@ class Probe:
                                   f"{tau_prev:.4f}", f"{tde:.4f}", f"{pd:.4f}", f"{sw:.4f}", f"{tau[j6]:.4f}",
                                   f"{k_hat:.3f}", f"{eta:.2f}"])
                 tau_prev = tau[j6]  # 포화 후 값 — 실제 보낸 토크로 다음 TDE
+                pd_fw_prev = self.kp[j6] * e + self.kd[j6] * ed if a.hybrid else 0.0  # 펌웨어 PD 추정(내부 게인 배율 1 가정)
             for j in range(6):
                 p.JointMitCtrl(j + 1, float(qr[j]), float(vr[j]), float(self.kp[j]), float(self.kd[j]), float(tau[j]) + TAU_STEP / 2)
             self.log("mit", s, qr, tau)
-            if np.abs(s[1]).max() > SPEED_LIMIT and self.fast_n == 0:
+            if np.abs(s[1] - (vr if a.speed_err else 0.0)).max() > SPEED_LIMIT and self.fast_n == 0:
                 self.spike_n += 1
-            reason = self.check(s, qr, "mit", tt)
+            reason = self.check(s, qr, "mit", tt, vr)
             if sent is not None and not reason:  # 우리 토크만 쓰는 관절: 직전에 보낸 τ를 모터가 안 따르면 중단
                 pure = (self.kp == 0) & (self.kd == 0)
                 bad = pure & (np.abs(sent - s[2]) > MISMATCH_NM)
@@ -350,6 +361,7 @@ def main():
     ap.add_argument("--sw-k", type=float, default=0.0, help="TDC 스위칭 게인 K[rad/s²] — 0이면 TDC만, M̄·K가 최대 보정 토크")
     ap.add_argument("--sw-phi", type=float, default=0.2, help="스위칭 경계층 φ[rad/s] — sat(s/φ)로 채터링 완화, --asmc에서 0이면 논문대로 sgn")
     ap.add_argument("--asmc", action="store_true", help="TDC + SS-ASMC(Baek & Kwon 2020 식 12–15) 적응 스위칭")
+    ap.add_argument("--hybrid", action="store_true", help="--tdc 관절도 펌웨어 MIT PD(--kp/--kd) 유지, 우리는 TDE 보정 + M̄q̈_d(+ 스위칭)만 τ_ff로")
     ap.add_argument("--asmc16", action="store_true", help="TDC + Baek·Jin·Han 2016 IEEE TIE 식 (11) 적응 스위칭")
     ap.add_argument("--phi", type=float, default=200.0, help="ASMC-2016 φ — 적응 속도")
     ap.add_argument("--alpha", type=float, default=1.0, help="ASMC-2016 α — 증가 φ|s|/α, 감소 φα/|s|")
@@ -363,6 +375,7 @@ def main():
     ap.add_argument("--k-max", type=float, default=20.0, help="K̂ 안전 상한(논문에 없음) — M̄K̂가 최대 스위칭 토크")
     ap.add_argument("--acc-fc", type=float, default=15.0, help="q̈ 추정 저역통과 차단 주파수[Hz]")
     ap.add_argument("--dev-limit", type=float, default=DEV_LIMIT_DEG, help="MIT 중 기준 이탈 중단 한계[deg] — 내부 튐(최대 4.75°) 관찰 시 6")
+    ap.add_argument("--speed-err", action="store_true", help="MIT 중 속도 한계를 |q̇ − q̇_ref|로 판정(빠른 사인파용, 기본은 |q̇|)")
     ap.add_argument("--mismatch-ms", type=float, default=60.0, help="우리 토크 관절에서 |보낸 τ − effort| > 1 N·m 지속 시 중단[ms]")
     ap.add_argument("--speed-consec", type=int, default=SPEED_CONSEC, help="MIT 중 속도 한계 연속 주기 — 내부 튐(20–30 ms) 관찰 시 10")
     ap.add_argument("--hold", type=float, default=5.0, help="유지 시간[s]")
