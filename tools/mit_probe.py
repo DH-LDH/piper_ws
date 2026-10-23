@@ -171,6 +171,11 @@ class Probe:
             if a.stage == "sine":
                 print(f"[dry-run] J{a.joint} 사인파: ±{a.amp}° {a.hz} Hz, {a.cycles}주기, 진폭 2 s 램프 → q_ref 범위 "
                       f"{np.degrees(q_hold[a.joint - 1]) - a.amp:.1f} ~ {np.degrees(q_hold[a.joint - 1]) + a.amp:.1f}°")
+            if a.chirp_joint:
+                path = (f"dist_comp({a.dist_mode})" if a.tdc and a.chirp_joint == a.joint else "τ_ff 직접")
+                print(f"[dry-run] 처프 J{a.chirp_joint}: ±{a.chirp_amp} N·m, {a.chirp_f0}–{a.chirp_f1} Hz 로그 스윕 {a.chirp_dur} s, "
+                      f"MIT {a.chirp_start} s부터, 경로 {path}"
+                      + (" — 실제 토크는 TDE 반응으로 처프와 달라짐(10-24 가짜 팔: accel 최대 7배, torque 저주파 1/4·중간 3.3배)" if path != "τ_ff 직접" else " — 보낸 토크 = 처프"))
             print("[dry-run] 명령은 하나도 보내지 않음. 실제 실행은 --go")
             return "dry-run"
         # 3) MIT 전환 + 6축 유지(+사인파)

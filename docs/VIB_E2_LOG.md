@@ -140,10 +140,29 @@ IMU 빈틈은 **합산 표본 수에 비례** — 가속도 63 Hz·자이로 200
 - 처프 경로 = τ_vib가 들어갈 경로: **TDC 관절(J2)이면 `dist_comp`**(dist_mode 따름), 아니면(J5) τ_ff에 직접.
 - 가짜 팔(강체·지연 없음): J2(dist_comp, accel) 이탈 최대 1.0°·q̇ 최대 0.81 rad/s — accel 모드에선 처프가 TDE를 거쳐 가속도 명령(0.12/M̄ 0.01 = 12 rad/s²)처럼 작동. J5(펌웨어 PD만) 이탈 0.74°·q̇ 0.13 rad/s. 처프 없을 때 D1 분리 전후 9경우 바이트 동일 유지.
 
-다음 실기 명령(자세 A, 각 3회, 첫 회는 0.12만):
+### 6-1. 처프 경로 검증 (10-24, 8절 1dac8ff 확인)
+
+가짜 팔(관성 0.05 = M̄ 0.01의 5배, 강체·지연 없음), J2 처프 rms 0.083 N·m:
+
+| 경로 | 실제 보낸 J2 τ 변동 rms 2–4 / 4–9 / 9–20 Hz [N·m] | 이탈 최대 | q̇ 최대 |
+|---|---|---|---|
+| 하이브리드 + accel | 0.10 / **0.61** / 0.16 | 1.00° | 0.81 rad/s |
+| 하이브리드 + torque | **0.02** / **0.28** / 0.13 | 0.53° | 0.41 |
+| **TDC 없이 τ_ff 직접** | **0.083 / 0.085 / 0.083** | 0.74° | 0.13 |
+
+- 검증: "accel 모드는 가속도 명령이라 실제 토크 ≈ (실제 관성/M̄) × 처프" — **확인**(가짜 팔 최대 7배). 단 E4에서 J2 M̄ 0.02가 발진했으니 고주파 실효 관성은 0.01 안팎 — "한 자릿수 이상 큼"은 저주파(링크 포함) 관성에서만 가능, 실기 배율은 모름.
+- 검증: "torque 모드면 ±0.12 N·m가 그대로 들어가 순수 식별" — **아님**. commit에서 처프를 빼고 넘기면 TDE가 처프 효과를 외란으로 보고 상쇄 → 저주파는 1/4로 지워지고 중간 대역은 TDE 루프 때문에 3.3배. τ_vib를 torque 모드로 넣을 때의 실제 경로 시험으로는 의미 있음.
+- **순수 식별 = TDC 없이 τ_ff에 직접**(펌웨어 PD만, J5 명령과 같은 방식) — 보낸 토크 = 처프가 코드 구조상 보장됨.
+- "dry-run으로 첫 주기 τ 최대값 확인": dry-run은 명령을 안 보내 폐루프 τ를 알 수 없음 → dry-run에 처프 경로·설정과 위 배율 경고를 출력하게 함. 실제 τ는 CSV `tff` 컬럼으로 사후 확인, 주파수 응답도 처프 대신 **실제 보낸 τ**를 입력으로 계산.
+
+다음 실기 명령(자세 A, 각 3회, 첫 회는 0.12만) — **J2 순서 수정: ① 직접 → ② torque → ③ accel(0.01–0.02, 1회)**:
 ```
-# J2 — 하이브리드 TDE + 처프(dist_comp, accel)
-python3 tools/mit_probe.py --stage hold --hold 24 --tdc --hybrid --joint 2 --mbar 0.01 --chirp-joint 2 --chirp-amp 0.12 --dev-limit 6 --speed-consec 10 --imu --go
+# J2 ① 순수 식별 — 6축 펌웨어 PD + J2 τ_ff 직접 처프
+python3 tools/mit_probe.py --stage hold --hold 24 --chirp-joint 2 --chirp-amp 0.12 --dev-limit 6 --speed-consec 10 --imu --go
+# J2 ② 하이브리드 TDE + 처프(dist_comp, torque) — τ_vib torque 모드 경로
+python3 tools/mit_probe.py --stage hold --hold 24 --tdc --hybrid --joint 2 --mbar 0.01 --chirp-joint 2 --chirp-amp 0.12 --dist-mode torque --dev-limit 6 --speed-consec 10 --imu --go
+# J2 ③ 하이브리드 + accel — 진폭 0.01–0.02로 1회만
+python3 tools/mit_probe.py --stage hold --hold 24 --tdc --hybrid --joint 2 --mbar 0.01 --chirp-joint 2 --chirp-amp 0.02 --dist-mode accel --dev-limit 6 --speed-consec 10 --imu --go
 # J5 — 6축 펌웨어 PD + J5 τ_ff 처프
 python3 tools/mit_probe.py --stage hold --hold 24 --chirp-joint 5 --chirp-amp 0.12 --dev-limit 6 --speed-consec 10 --imu --go
 # M̄별 하이브리드 J2 정지 툭(TDE가 모드 감쇠를 깎는지)
