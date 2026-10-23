@@ -30,11 +30,16 @@ def main():
     ap.add_argument("csv", nargs="+")
     ap.add_argument("--pitch", type=float, default=MOUNT_PITCH_DEG)
     ap.add_argument("--roll", type=float, default=MOUNT_ROLL_DEG)
+    ap.add_argument("--host-time", action="store_true", help="IMU를 PC 수신 시각 그대로(E2 첫 분석과 같은 방식)")
     a = ap.parse_args()
     k = PiperKin(); tb = ImuToBase(k, a.pitch, a.roll); fs = 200
     for f in a.csv:
         d = pd.read_csv(f).drop_duplicates("ts_h"); t0 = float(open(f.replace(".csv", ".t0")).read())
-        i = pd.read_csv(f.replace(".csv", ".imu.csv")); i["t"] -= t0
+        i = pd.read_csv(f.replace(".csv", ".imu.csv"))
+        if not a.host_time:  # PC 수신 시각은 중앙 23 ms 늦음 → 장치 시각 + 최소 오프셋
+            off = i.t.values - i.t_dev.values / 1000; ok = np.abs(off - np.median(off)) < 1.0
+            i = i[ok].copy(); i["t"] = i.t_dev / 1000 + np.percentile(off[ok], 1)
+        i["t"] -= t0
         st = d[d.phase == "settle"]; acc = i[i.stream == "a"]
         g0 = acc[(acc.t > st.t.iloc[0]) & (acc.t < st.t.iloc[-1])][["x", "y", "z"]].mean().values
         gb = tb.rot(np.radians(st[[f"q{j}" for j in range(1, 7)]].mean().values)) @ g0
