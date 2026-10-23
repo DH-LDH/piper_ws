@@ -180,6 +180,7 @@ class Probe:
         pd_fw_prev = 0.0
         k_hat = 0.0; eta = a.eta_lo  # SS-ASMC 스위칭 게인 K̂, 갱신 파라미터 η̂(하한에서 시작)
         sent = None; mm_t = np.zeros(6); t_last = None
+        beeped = not a.beep
         while True:
             now = time.time(); tt = now - t_start
             if tt > dur:
@@ -191,6 +192,8 @@ class Probe:
                 qr[j6] = q_hold[j6] + A * math.sin(w * ts)
                 vr[j6] = A * w * math.cos(w * ts)
                 ar = -A * w * w * math.sin(w * ts)
+            if not beeped and tt >= a.beep:
+                print("\a▶ 지금 툭", flush=True); beeped = True
             s = read_state(p)  # 읽기 → 계산 → 송신 (우리 P가 최신 위치를 쓰도록)
             tau = tff.copy()
             if self.ext_kp is not None:
@@ -395,6 +398,7 @@ def main():
     ap.add_argument("--cycles", type=float, default=3.0)
     ap.add_argument("--can", default="can_piper")
     ap.add_argument("--imu", action="store_true", help="손목 D455 IMU 동시 기록(tools/imu_rec.py)")
+    ap.add_argument("--beep", type=float, default=0.0, help="MIT 진입 뒤 이 시각[s]에 툭 신호 표시(VIB D0 조건 b), 0이면 없음")
     a = ap.parse_args()
     if a.amp > 10:
         raise SystemExit("사인파 진폭은 10° 이하로")
