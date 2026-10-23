@@ -62,7 +62,8 @@ class Probe:
         self.w = csv.writer(self.f)
         J = range(1, 7)
         self.w.writerow(["t", "phase"] + [f"q{j}" for j in J] + [f"qd{j}" for j in J] + [f"eff{j}" for j in J]
-                        + [f"qref{j}" for j in J] + [f"tff{j}" for j in J] + ["arm_status", "ctrl_mode", "mode_feed", "enabled"])
+                        + [f"qref{j}" for j in J] + [f"tff{j}" for j in J] + ["arm_status", "ctrl_mode", "mode_feed", "enabled"]
+                        + (["chirp"] if a.chirp_joint else []))
         self.t0 = time.time()
         self.imu = None
         if a.imu:  # 손목 D455 IMU 동시 기록(VIB D0) — 시각은 epoch, .t0로 맞춤
@@ -93,11 +94,11 @@ class Probe:
             self.tw = csv.writer(self.tdc)
             self.tw.writerow(["t", "e", "ed", "qdd_f", "ar", "tau_prev", "tde", "pd", "sw", "tau", "K", "eta"])
 
-    def log(self, phase, s, qref, tff):
+    def log(self, phase, s, qref, tff, chirp_v=None):
         q, qd, eff, en, st = s
         self.w.writerow([f"{time.time() - self.t0:.4f}", phase] + list(np.degrees(q).round(4)) + list(qd.round(4))
                         + list(eff.round(4)) + list(np.degrees(qref).round(4)) + list(np.round(tff, 4))
-                        + list(st) + [int(en.all())])
+                        + list(st) + [int(en.all())] + ([] if not self.a.chirp_joint else [f"{chirp_v or 0.0:.5f}"]))
 
     def check(self, s, qref, phase, t_mit=None, vref=None):  # 중단 사유 문자열 또는 None
         q, qd, eff, en, st = s
@@ -181,12 +182,14 @@ class Probe:
         reason = None
         t_prev = None
         ctrl = None
+        chirp_now = {"v": 0.0}  # 이번 주기 처프 토크 — TDC 관절이면 dist_comp(τ_vib와 같은 경로), 아니면 τ_ff에 직접
         if self.tdc is not None:
             sw = "asmc16" if a.asmc16 else "asmc" if a.asmc else "fixed" if a.sw_k else "none"
             ctrl = JointCtrl(JointCtrlCfg(mbar=a.mbar, ks=a.ks, kg=a.kg, acc_fc=a.acc_fc, hybrid=a.hybrid,
                                           kp_fw=self.kp[j6], kd_fw=self.kd[j6], switch=sw, sw_k=a.sw_k, sw_phi=a.sw_phi,
                                           k_max=a.k_max, eps=a.eps, phi=a.phi, alpha=a.alpha, delta=a.delta, gamma=a.gamma,
-                                          a_exp=a.a_exp, eta_lo=a.eta_lo, eta_hi=a.eta_hi, mu=a.mu), tff[j6])
+                                          a_exp=a.a_exp, eta_lo=a.eta_lo, eta_hi=a.eta_hi, mu=a.mu, dist_mode=a.dist_mode), tff[j6],
+                             dist_comp=(lambda o: chirp_now["v"]) if a.chirp_joint == a.joint else None)
         sent = None; mm_t = np.zeros(6); t_last = None
         beeped = not a.beep
         while True:
@@ -202,6 +205,7 @@ class Probe:
                 ar = -A * w * w * math.sin(w * ts)
             if not beeped and tt >= a.beep:
                 print("\a▶ 지금 툭", flush=True); beeped = True
+            chirp_now["v"] = chirp(a, tt) if a.chirp_joint else 0.0
             s = read_state(p)  # 읽기 → 계산 → 송신 (우리 P가 최신 위치를 쓰도록)
             tau = tff.copy()
             if self.ext_kp is not None:
@@ -213,7 +217,9 @@ class Probe:
                 t_prev = now
                 co = ctrl.step(s[0][j6], s[1][j6], qr[j6], vr[j6], ar, h)
                 tau[j6] = co["tau"]
-            if self.ext_kp is not None or self.ext_kd is not None or self.tdc is not None:
+            if a.chirp_joint and a.chirp_joint != a.joint or (a.chirp_joint and self.tdc is None):
+                tau[a.chirp_joint - 1] += chirp_now["v"]
+            if self.ext_kp is not None or self.ext_kd is not None or self.tdc is not None or a.chirp_joint:
                 tau = np.clip(tau, -TAU_CMD_LIMIT, TAU_CMD_LIMIT)
             if self.tdc is not None:
                 self.tw.writerow([f"{now - self.t0:.4f}", f"{co['e']:.6f}", f"{co['ed']:.5f}", f"{co['qdd_f']:.4f}", f"{ar:.5f}",
@@ -222,7 +228,7 @@ class Probe:
                 ctrl.commit(tau[j6])  # 포화 후 값 — 실제 보낸 토크로 다음 TDE
             for j in range(6):
                 p.JointMitCtrl(j + 1, float(qr[j]), float(vr[j]), float(self.kp[j]), float(self.kd[j]), float(tau[j]) + TAU_STEP / 2)
-            self.log("mit", s, qr, tau)
+            self.log("mit", s, qr, tau, chirp_now["v"] if a.chirp_joint else None)
             if np.abs(s[1] - (vr if a.speed_err else 0.0)).max() > SPEED_LIMIT and self.fast_n == 0:
                 self.spike_n += 1
             reason = self.check(s, qr, "mit", tt, vr)
@@ -243,6 +249,15 @@ class Probe:
         for _ in range(int(1.0 / dt)):
             self.log("estop", read_state(p), q_hold, np.zeros(6)); time.sleep(dt)
         return (f"중단: {reason}" if reason else "정상 종료") + f" | 순간 튐(1주기라도 {SPEED_LIMIT} rad/s 초과) {self.spikes}회"
+
+
+def chirp(a, tt):  # MIT 진입 뒤 --chirp-start s부터 로그 스윕 f0→f1, --chirp-dur 동안, 앞뒤 0.5 s 진폭 램프
+    t = tt - a.chirp_start; T = a.chirp_dur
+    if t < 0 or t > T:
+        return 0.0
+    k = a.chirp_f1 / a.chirp_f0
+    ph = 2 * math.pi * a.chirp_f0 * T / math.log(k) * (k ** (t / T) - 1)
+    return a.chirp_amp * min(1.0, t / 0.5, (T - t) / 0.5) * math.sin(ph)
 
 
 def bus_type(p):  # SDK 내부 CAN 버스 객체의 클래스 이름(ThreadSafeBus 적용 확인용)
@@ -366,10 +381,17 @@ def main():
     ap.add_argument("--cycles", type=float, default=3.0)
     ap.add_argument("--can", default="can_piper")
     ap.add_argument("--imu", action="store_true", help="손목 D455 IMU 동시 기록(tools/imu_rec.py)")
+    ap.add_argument("--dist-mode", choices=["accel", "torque"], default="accel", help="dist_comp(처프·τ_vib)를 다음 TDE에 넘길지")
+    ap.add_argument("--chirp-joint", type=int, default=0, help="처프 토크를 더할 관절(0이면 없음) — --joint와 같으면 dist_comp 경로")
+    ap.add_argument("--chirp-amp", type=float, default=0.12, help="처프 진폭[N·m] — MIT 토크 한 칸 0.063, 최소 두 칸")
+    ap.add_argument("--chirp-f0", type=float, default=2.0); ap.add_argument("--chirp-f1", type=float, default=20.0)
+    ap.add_argument("--chirp-dur", type=float, default=20.0); ap.add_argument("--chirp-start", type=float, default=2.0)
     ap.add_argument("--beep", type=float, default=0.0, help="MIT 진입 뒤 이 시각[s]에 툭 신호 표시(VIB D0 조건 b), 0이면 없음")
     a = ap.parse_args()
     if a.amp > 10:
         raise SystemExit("사인파 진폭은 10° 이하로")
+    if a.chirp_joint and (a.chirp_amp > 0.25 or a.stage != "hold" or a.hold < a.chirp_start + a.chirp_dur):
+        raise SystemExit("처프는 --stage hold, 진폭 0.25 N·m 이하, --hold ≥ chirp-start + chirp-dur")
     if a.fake:
         p = make_fake(kick=a.fake_kick, modedrop=a.fake_modedrop, refzero=a.fake_refzero, friction=a.fake_friction)
     else:

@@ -108,19 +108,45 @@ def cmd_validate(a, kin, tb):
             print(f"| {nm} | {v_imu[:, c].std() * 1000:.2f} | {e_m.std() * 1000:.2f} | {e_h.std() * 1000:.2f} | {e_h.std() / e_m.std():.2f} | {coh:.2f} |")
 
 
+def cmd_figure(a, kin, tb):  # 논문 Fig. 7·8 꼴 — 측정 가속도 vs 모터만 vs 추정, IMU 원점 base z, 4–10 Hz
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from traj_analyze import _font
+    _font()
+    fig, axs = plt.subplots(len(a.csv), 1, figsize=(9, 2.8 * len(a.csv)), squeeze=False)
+    for k, f in enumerate(a.csv):
+        d = pd.read_csv(f); body = d[~d.phase.isin(["settle", "after", "estop", "measure"])]; ts = body.t.iloc[0]
+        t1, t2 = (ts + 4, ts + 9) if "_slow_" in f else (ts + 6.3, ts + 8.3)
+        tu, Q, QD, G, A = load_aligned(f, t1, t2, kin, tb)
+        J = [jacobians(kin, q, tb.R_l6) for q in Q]; Jw = np.array([j[0] for j in J]); Jv = np.array([j[1] for j in J])
+        WM = np.einsum("nij,nj->ni", Jw, QD)
+        G = G - np.array([band(G[:, c], 0, 1.5) for c in range(3)]).T + np.array([band(WM[:, c], 0, 1.5) for c in range(3)]).T
+        est = LinkVelEst(kin, tb.R_l6, w=a.w, axes=a.axes); QH = np.array([est.vel(q, qd, g)[0] for q, qd, g in zip(Q, QD, G)])
+        am = band(np.gradient(np.einsum("nj,nj->n", Jv[:, 2], QD), 1 / FS), 4, 10)
+        ah = band(np.gradient(np.einsum("nj,nj->n", Jv[:, 2], QH), 1 / FS), 4, 10); ay = band(A[:, 2], 4, 10)
+        ax = axs[k][0]
+        ax.plot(tu - tu[0], ay, color="k", lw=1.2, label="가속도계(정답)")
+        ax.plot(tu - tu[0], am, color="C0", lw=1, label=f"모터 엔코더만 (오차 {np.std(am - ay):.2f})")
+        ax.plot(tu - tu[0], ah, color="C3", lw=1, label=f"자이로 추정 (오차 {np.std(ah - ay):.2f})")
+        ax.set_ylabel("base z 가속도 [m/s²]"); ax.set_title(os.path.basename(f), fontsize=9); ax.legend(fontsize=8, loc="upper right"); ax.grid(alpha=0.3)
+    axs[-1][0].set_xlabel("시간 [s]"); fig.tight_layout(); fig.savefig(a.out, dpi=120); print(f"그림: {a.out}")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["shares", "validate"])
+    ap.add_argument("cmd", choices=["shares", "validate", "figure"])
     ap.add_argument("csv", nargs="+")
     ap.add_argument("--exclude", nargs="*", default=["poseA_x2"])
     ap.add_argument("--w", type=float, nargs=6, default=[1, 1, 1, 1, 1, 1])
     ap.add_argument("--axes", type=int, nargs="+", default=[0, 1, 2], help="쓸 자이로 base 축 — 피치만이면 1")
+    ap.add_argument("--out", default="docs/img/p_vib_e2_est.png")
     ap.add_argument("--host-time", action="store_true", help="IMU를 PC 수신 시각 그대로(비교용)")
     a = ap.parse_args()
     global DEV_TIME
     DEV_TIME = not a.host_time
     kin = PiperKin(); tb = ImuToBase(kin)
-    cmd_shares(a, kin, tb) if a.cmd == "shares" else cmd_validate(a, kin, tb)
+    {"shares": cmd_shares, "validate": cmd_validate, "figure": cmd_figure}[a.cmd](a, kin, tb)
 
 
 if __name__ == "__main__":
