@@ -15,6 +15,9 @@ import time
 
 import numpy as np
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "common_pkg"))
+from joint_ctrl import JointCtrl, JointCtrlCfg  # noqa: E402
+
 DEV_LIMIT_DEG = 3.0       # 기준 대비 이탈 한계
 SPEED_LIMIT = 0.5         # [rad/s] 관절 속도 한계(10-06 0xAD 튐은 3~9 rad/s)
 SPEED_CONSEC = 3          # 속도 한계는 연속 3주기 초과 시만 — 정지 중 속도 피드백 잡음 최대 0.1 rad/s
@@ -176,9 +179,14 @@ class Probe:
         dur = hold_s + (a.cycles / a.hz + 2.0 if a.stage == "sine" else 0.0)
         j6 = a.joint - 1
         reason = None
-        tau_prev = tff[j6]; qd_prev = None; qdd_f = 0.0; t_prev = None
-        pd_fw_prev = 0.0
-        k_hat = 0.0; eta = a.eta_lo  # SS-ASMC 스위칭 게인 K̂, 갱신 파라미터 η̂(하한에서 시작)
+        t_prev = None
+        ctrl = None
+        if self.tdc is not None:
+            sw = "asmc16" if a.asmc16 else "asmc" if a.asmc else "fixed" if a.sw_k else "none"
+            ctrl = JointCtrl(JointCtrlCfg(mbar=a.mbar, ks=a.ks, kg=a.kg, acc_fc=a.acc_fc, hybrid=a.hybrid,
+                                          kp_fw=self.kp[j6], kd_fw=self.kd[j6], switch=sw, sw_k=a.sw_k, sw_phi=a.sw_phi,
+                                          k_max=a.k_max, eps=a.eps, phi=a.phi, alpha=a.alpha, delta=a.delta, gamma=a.gamma,
+                                          a_exp=a.a_exp, eta_lo=a.eta_lo, eta_hi=a.eta_hi, mu=a.mu), tff[j6])
         sent = None; mm_t = np.zeros(6); t_last = None
         beeped = not a.beep
         while True:
@@ -200,58 +208,18 @@ class Probe:
                 tau = tau + self.ext_kp * (qr - s[0])
             if self.ext_kd is not None:
                 tau = tau + self.ext_kd * (vr - s[1])
-            if self.tdc is not None:  # τ = τ(t−L) − M̄·q̈(t−L) + M̄(q̈_d + (Ks+Kg)ė + Ks·Kg·e)
-                h = 0.0
-                if qd_prev is not None:
-                    h = max(now - t_prev, 1e-3)
-                    al = h / (h + 1.0 / (2 * math.pi * a.acc_fc))
-                    qdd_f += al * ((s[1][j6] - qd_prev) / h - qdd_f)
-                qd_prev = s[1][j6]; t_prev = now
-                e = qr[j6] - s[0][j6]; ed = vr[j6] - s[1][j6]
-                tde = tau_prev - a.mbar * qdd_f
-                if a.hybrid:  # τ_ff = [τ_ff + 펌웨어 PD](t−L) − M̄q̈(t−L) + M̄q̈_d — PD는 드라이버가, 우리는 TDE 보정만(10-20 고정 PD는 매끈, TDC는 속도 변화에 강함)
-                    tde += pd_fw_prev
-                    pd = a.mbar * ar
-                else:
-                    pd = a.mbar * (ar + (a.ks + a.kg) * ed + a.ks * a.kg * e)
-                sv = ed + a.ks * e  # 논문 (6) s = ė + Ks·e
-                if a.asmc16:  # Baek·Jin·Han 2016 TIE 식 (11): |s| ≥ ε면 φ|s|/α로 증가, 작으면 −φα/|s|로 급감
-                    th = 1.0 if abs(sv) - a.eps >= 0 else -1.0
-                    if k_hat > 1e-4:  # 논문 실험의 k̂ > 0.0001 처리
-                        kdot = a.phi * (max(abs(sv), 1e-6) / a.alpha) ** th * th  # s = 0이면 감소항 발산 방지
-                    else:
-                        kdot = a.phi * abs(sv) / a.alpha
-                    k_hat = float(np.clip(k_hat + kdot * h, 0.0, a.k_max))
-                    sgn = (1.0 if sv >= 0 else -1.0) if not a.sw_phi else float(np.clip(sv / a.sw_phi, -1.0, 1.0))
-                    sw = a.mbar * k_hat * sgn
-                elif a.asmc:  # 논문 (12)–(15) SS-ASMC — parent (13) K̂, child (14) η̂, 오일러 적분
-                    chi = 1.0 if abs(sv) - a.eps >= 0 else -1.0
-                    kdot = a.delta * eta * abs(sv) * (chi if k_hat > 0 and sv != 0 else 1.0)
-                    sat_k = abs(kdot) >= a.mu
-                    kdot = float(np.clip(kdot, -a.mu, a.mu))
-                    if sat_k:
-                        etadot = 0.0
-                    elif eta >= a.eta_hi:
-                        etadot = -a.gamma * abs(sv)
-                    elif eta <= a.eta_lo:
-                        etadot = a.gamma * abs(sv)
-                    else:
-                        etadot = -a.gamma * abs(sv) ** a.a_exp * chi
-                    k_hat = float(np.clip(k_hat + kdot * h, 0.0, a.k_max))
-                    eta = float(np.clip(eta + etadot * h, a.eta_lo, a.eta_hi))
-                    sgn = (1.0 if sv >= 0 else -1.0) if not a.sw_phi else float(np.clip(sv / a.sw_phi, -1.0, 1.0))
-                    sw = a.mbar * k_hat * sgn
-                else:  # 3단계 고정 스위칭 M̄·K·sat(s/φ)
-                    sw = a.mbar * a.sw_k * float(np.clip(sv / a.sw_phi, -1.0, 1.0)) if a.sw_k else 0.0
-                tau[j6] = tde + pd + sw
+            if self.tdc is not None:  # τ = τ(t−L) − M̄·q̈(t−L) + M̄(q̈_d + (Ks+Kg)ė + Ks·Kg·e) + 스위칭 — src/common_pkg/joint_ctrl.py
+                h = max(now - t_prev, 1e-3) if t_prev is not None else 0.0
+                t_prev = now
+                co = ctrl.step(s[0][j6], s[1][j6], qr[j6], vr[j6], ar, h)
+                tau[j6] = co["tau"]
             if self.ext_kp is not None or self.ext_kd is not None or self.tdc is not None:
                 tau = np.clip(tau, -TAU_CMD_LIMIT, TAU_CMD_LIMIT)
             if self.tdc is not None:
-                self.tw.writerow([f"{now - self.t0:.4f}", f"{e:.6f}", f"{ed:.5f}", f"{qdd_f:.4f}", f"{ar:.5f}",
-                                  f"{tau_prev:.4f}", f"{tde:.4f}", f"{pd:.4f}", f"{sw:.4f}", f"{tau[j6]:.4f}",
-                                  f"{k_hat:.3f}", f"{eta:.2f}"])
-                tau_prev = tau[j6]  # 포화 후 값 — 실제 보낸 토크로 다음 TDE
-                pd_fw_prev = self.kp[j6] * e + self.kd[j6] * ed if a.hybrid else 0.0  # 펌웨어 PD 추정(내부 게인 배율 1 가정)
+                self.tw.writerow([f"{now - self.t0:.4f}", f"{co['e']:.6f}", f"{co['ed']:.5f}", f"{co['qdd_f']:.4f}", f"{ar:.5f}",
+                                  f"{co['tau_prev']:.4f}", f"{co['tde']:.4f}", f"{co['pd']:.4f}", f"{co['sw']:.4f}", f"{tau[j6]:.4f}",
+                                  f"{co['K']:.3f}", f"{co['eta']:.2f}"])
+                ctrl.commit(tau[j6])  # 포화 후 값 — 실제 보낸 토크로 다음 TDE
             for j in range(6):
                 p.JointMitCtrl(j + 1, float(qr[j]), float(vr[j]), float(self.kp[j]), float(self.kd[j]), float(tau[j]) + TAU_STEP / 2)
             self.log("mit", s, qr, tau)
