@@ -9,11 +9,15 @@ import csv
 import signal
 import sys
 import threading
+import os
 import time
 
+RSUSB = os.path.expanduser("~/librealsense_rsusb/py")  # 젯슨 커널에 HID 센서 허브가 없어 pip 휠(V4L)로는 IMU가 안 보임 — RSUSB 소스 빌드
+if os.path.isdir(RSUSB):
+    sys.path.insert(0, RSUSB)
 import pyrealsense2 as rs
 
-ACCEL_HZ = (200, 100, 63)  # D455 지원 값 중 높은 것부터
+ACCEL_HZ = (250, 63)  # D455 지원 값 중 높은 것부터
 GYRO_HZ = (400, 200)
 
 
@@ -68,6 +72,7 @@ def main():
             w.writerows((f"{t:.6f}", f"{td:.3f}", k, f"{x:.5f}", f"{y:.5f}", f"{z:.5f}") for t, td, k, x, y, z in rows)
         f.close()
         print(f"IMU 기록 종료: 가속도 {n['a']}개, 자이로 {n['g']}개", flush=True)
+        os._exit(0)  # librealsense 종료 정리가 가끔 멈춤(10-23) — 파일은 이미 닫음
 
 
 if __name__ == "__main__":

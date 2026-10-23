@@ -4,6 +4,7 @@
 stage tap : 현재 자세 유지 + 사용자가 EE를 툭 침 (조건 a 가진 ①)
 stage step: --joint에 --step° 계단 → 절반 지나 원위치 (조건 a 가진 ②)
 stage slow: --joints 사인파 저속 추종 (조건 a′, E5 느린 사인파 ±5° 0.25 Hz와 같은 궤적)
+stage goto: --target 관절각까지 코사인 속도 프로파일로 이동(최고 --vmax °/s) — 자세 B 이동용
 기록 200 Hz(q, q̇, effort, SDK 수신 시각), JointCtrl 송신 100 Hz, --imu면 손목 D455 IMU 동시 기록.
 정상 종료는 위치 모드 유지(다음 시행 바로 가능), 이상 시 MotionCtrl_1(0x01)(천천히 내려앉음).
 사용: python3 tools/vib_probe.py --stage tap --imu [--go]      (--fake: 가짜 팔로 로직 시험)
@@ -24,6 +25,7 @@ LOG_ROOT = os.path.expanduser("~/piper_ws/logs/vib")
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 STEP_MAX_DEG = 3.0
 AMP_MAX_DEG = 10.0
+GOTO_MAX_DEG = 40.0       # goto 한 번에 관절당 최대 변화
 
 
 def stamps(p):  # SDK가 관절·고속 피드백을 받은 시각 — 200 Hz 로그의 중복 행 구분용
@@ -105,10 +107,19 @@ class Vib:
                 ramp = min(1.0, ts / 2.0); w = 2 * math.pi * a.hz; A = math.radians(a.amp) * ramp
                 for j in a.joints:
                     qr[j - 1] = q0[j - 1] + A * math.sin(w * ts); vr[j - 1] = A * w * math.cos(w * ts)
+        elif a.stage == "goto" and tt > a.lead:  # q0 + Δ·(1 − cos πu)/2, u = (t − lead)/T — 시작·끝 속도 0
+            dq = np.radians(a.target) - q0; T = self.goto_T(q0); u = min(1.0, (tt - a.lead) / T)
+            qr = q0 + dq * (1 - math.cos(math.pi * u)) / 2
+            vr = dq * math.pi / (2 * T) * math.sin(math.pi * u) if u < 1.0 else np.zeros(6)
         return qr, vr
+
+    def goto_T(self, q0):  # 최고 관절 속도가 vmax가 되는 이동 시간
+        return max(0.5, math.pi / 2 * np.degrees(np.abs(np.radians(self.a.target) - q0)).max() / self.a.vmax)
 
     def duration(self):
         a = self.a
+        if a.stage == "goto":
+            return a.lead + self.goto_T(self.q0) + a.tail
         return a.lead + a.cycles / a.hz + a.tail if a.stage == "slow" else a.sec
 
     def run(self):
@@ -119,8 +130,13 @@ class Vib:
         print(f"현재 q[deg] {np.degrees(q).round(1)} | enable {en.astype(int)} | status {st} | 피드백 관절 {hj:.0f} Hz, 고속 {hh:.0f} Hz")
         if not en.all() or st[0] != 0 or st[1] != 1:
             raise SystemExit("★ 팔이 위치 모드(CAN 제어)로 Enable된 상태가 아님 — traj_test로 자세를 잡은 뒤 실행")
-        q0 = q.copy()
-        if a.stage == "step":
+        q0 = self.q0 = q.copy()
+        if a.stage == "goto":
+            d = np.array(a.target) - np.degrees(q0)
+            if np.abs(d).max() > GOTO_MAX_DEG:
+                raise SystemExit(f"★ goto 변화 J{int(np.abs(d).argmax()) + 1} {d[np.abs(d).argmax()]:+.1f}° > {GOTO_MAX_DEG}° — 나눠서 이동")
+            print(f"이동 목표 q[deg] {np.round(a.target, 1)}\n변화 {d.round(1)} | 최고 {a.vmax}°/s, {self.goto_T(q0):.1f} s")
+        elif a.stage == "step":
             print(f"J{a.joint} 계단 {a.step:+.1f}°: {a.lead:.0f} s에 올리고 {a.lead + (a.sec - a.lead) / 2:.1f} s에 원위치, 총 {a.sec:.0f} s")
         elif a.stage == "slow":
             print(f"J{a.joints} 사인파 ±{a.amp}° {a.hz} Hz {a.cycles}주기 (램프 2 s), 앞 {a.lead} s·뒤 {a.tail} s 정지 → 총 {self.duration():.1f} s")
@@ -162,15 +178,16 @@ class Vib:
             for _ in range(int(a.rate)):
                 self.log("estop", read_state(p), q0); time.sleep(dt)
             return f"중단: {reason} — 비상 정지 송신"
+        q_end = self.ref(q0, dur)[0]  # goto는 목표 자세, 나머지는 시작 자세
         for _ in range(int(a.rate)):  # 3) 끝난 뒤 1 s 더 기록(위치 모드 유지)
-            p.JointCtrl(*[round(v * 1000) for v in np.degrees(q0)])
-            self.log("after", read_state(p), q0); time.sleep(dt)
-        return "정상 종료 — 위치 모드로 시작 자세 유지 중"
+            p.JointCtrl(*[round(v * 1000) for v in np.degrees(q_end)])
+            self.log("after", read_state(p), q_end); time.sleep(dt)
+        return "정상 종료 — 위치 모드로 " + ("목표" if a.stage == "goto" else "시작") + " 자세 유지 중"
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stage", choices=["tap", "step", "slow"], required=True)
+    ap.add_argument("--stage", choices=["tap", "step", "slow", "goto"], required=True)
     ap.add_argument("--go", action="store_true", help="실제로 명령 송신(없으면 dry-run)")
     ap.add_argument("--fake", action="store_true", help="가짜 팔로 로직 시험(CAN 미사용)")
     ap.add_argument("--imu", action="store_true", help="손목 D455 IMU 동시 기록(tools/imu_rec.py)")
@@ -184,6 +201,8 @@ def main():
     ap.add_argument("--amp", type=float, default=5.0, help="slow 진폭[deg]")
     ap.add_argument("--hz", type=float, default=0.25)
     ap.add_argument("--cycles", type=float, default=3.0)
+    ap.add_argument("--target", type=float, nargs=6, default=None, help="goto 목표 관절각[deg]")
+    ap.add_argument("--vmax", type=float, default=5.0, help="goto 최고 관절 속도[deg/s]")
     ap.add_argument("--spd", type=int, default=10, help="위치 모드 속도 비율[%] (mit_probe 정지 확인과 같은 10)")
     ap.add_argument("--dev-limit", type=float, default=3.0, help="기준 이탈 중단 한계[deg]")
     ap.add_argument("--speed-limit", type=float, default=0.5, help="|q̇ − q̇_ref| 중단 한계[rad/s]")
@@ -192,6 +211,8 @@ def main():
     ap.add_argument("--send-rate", type=float, default=100.0, help="JointCtrl 송신 주기[Hz]")
     ap.add_argument("--can", default="can_piper")
     a = ap.parse_args()
+    if a.stage == "goto" and (a.target is None or not 0 < a.vmax <= 10):
+        raise SystemExit("goto는 --target 6개 필요, --vmax는 10°/s 이하")
     if abs(a.step) > STEP_MAX_DEG or a.amp > AMP_MAX_DEG:
         raise SystemExit(f"계단은 {STEP_MAX_DEG}°, 진폭은 {AMP_MAX_DEG}° 이하로")
     if a.fake:
@@ -221,7 +242,11 @@ def main():
         v.f.close()
         for sp in (v.dump, v.imu):
             if sp:
-                sp.terminate(); sp.wait(timeout=3)
+                sp.terminate()
+                try:
+                    sp.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    sp.kill()
     print(f"결과: {res}\n기록: {v.path}" + (f"\nIMU: {v.path.replace('.csv', '.imu.csv')}" if v.imu else "")
           + (f"\nCAN 원본: {v.path.replace('.csv', '.candump')}" if v.dump else ""))
 

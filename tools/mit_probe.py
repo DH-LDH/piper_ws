@@ -426,7 +426,11 @@ def main():
         if pr.dump:
             pr.dump.terminate()
         if pr.imu:
-            pr.imu.terminate(); pr.imu.wait(timeout=3)
+            pr.imu.terminate()
+            try:
+                pr.imu.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pr.imu.kill()
         if pr.tdc:
             pr.tdc.close()
     print(f"결과: {res}\n기록: {pr.path}" + (f"\nIMU: {pr.path.replace('.csv', '.imu.csv')}" if pr.imu else "") + (f"\nCAN 원본: {pr.path.replace('.csv', '.candump')}" if pr.dump else ""))

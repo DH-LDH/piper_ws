@@ -20,6 +20,18 @@ def uniform(t, x, fs):  # 불균일 표본 → 등간격(선형 보간)
     return tu, np.interp(tu, t, x)
 
 
+def lp(x, fs, fc):  # 1차 저역통과 두 번 — 상시 40 Hz 서보 떨림을 걸러 구조 모드만 봄
+    if fc <= 0:
+        return x
+    a = (2 * np.pi * fc / fs) / (1 + 2 * np.pi * fc / fs)
+    for _ in range(2):
+        y = np.zeros_like(x); y[0] = x[0]
+        for i in range(1, len(x)):
+            y[i] = y[i - 1] + a * (x[i] - y[i - 1])
+        x = y
+    return x
+
+
 def hp(x, fs, fc):  # 1차 고역통과(앞뒤로 한 번씩 → 위상 0)
     if fc <= 0:
         return x - x.mean()
@@ -104,12 +116,17 @@ def analyze(path, a):
     if kind == "step":
         dq = np.abs(np.diff(sum(qref.values())))
         ev = [tu[i + 1] for i in np.where(dq > 0.5)[0]]
+        ev = [e for k, e in enumerate(ev) if k == 0 or e - ev[k - 1] > 0.1]  # 보간으로 한 계단이 두 샘플에 걸침
+    imu = load_imu(path, t0) if t0 is not None else None
+    if kind == "tap" and imu is not None and len(imu) > 50:  # q̇는 한 샘플 튐(±0.15 rad/s)이 툭보다 커서 IMU 크기 최대로 잡음(10-23)
+        w = imu[(imu.t >= tu[0]) & (imu.t < tu[0] + 7.0)]  # 신호음(시행 2 s) 뒤 5 s 안 — 시행 끝 손 닿음 제외
+        mag = np.sqrt(((w[["x", "y", "z"]] - w[["x", "y", "z"]].mean()) ** 2).sum(axis=1)).values
+        ev = [float(w.t.values[int(np.argmax(mag))])]
     elif kind == "tap":
         mag = np.max([np.abs(qd[j][1]) for j in range(1, 7)], axis=0)
         ev = [tu[int(np.argmax(mag))]]
-    else:
+    elif kind != "step":
         ev = [None]
-    imu = load_imu(path, t0) if t0 is not None else None
     rows = []
     for e in ev:
         if e is None:  # 궤적 전체, 저주파(궤적 자체) 제거
@@ -128,7 +145,7 @@ def analyze(path, a):
             if w.sum() > 32:
                 ax = max("xyz", key=lambda c: np.std(hp(imu[c][w].values, fi, a.hp)))
                 ti, ai = uniform(imu.t[w].values, imu[ax][w].values, fs)
-                ai = hp(ai, fs, a.hp)
+                ai = lp(hp(ai, fs, a.hp), fs, a.lp)
                 f_i, _ = peak(ai, fs)
                 if e is not None:  # q̇ 정지 잡음(최대 0.1 rad/s)에 묻히는 약한 가진은 IMU 감쇠가 기준
                     z_i, n_i = decay(ai, fs, f_i)
@@ -175,6 +192,7 @@ def main():
     ap.add_argument("--hp", type=float, default=1.5, help="고역통과[Hz] — 궤적·자세 성분 제거")
     ap.add_argument("--fs", type=float, default=200.0, help="재표본 주기[Hz]")
     ap.add_argument("--plot", default="")
+    ap.add_argument("--lp", type=float, default=0.0, help="IMU 저역통과[Hz] — 20이면 상시 40 Hz 서보 떨림 제거")
     ap.add_argument("--kind", choices=["auto", "tap", "step", "traj"], default="auto", help="가진 종류 — mit_probe 기록(조건 b 툭)은 tap 지정")
     ap.add_argument("--joint", type=int, default=0, help="주 관절 고정(0이면 응답이 가장 큰 관절)")
     a = ap.parse_args()
