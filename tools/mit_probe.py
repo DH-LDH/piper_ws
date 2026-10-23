@@ -61,6 +61,15 @@ class Probe:
         self.w.writerow(["t", "phase"] + [f"q{j}" for j in J] + [f"qd{j}" for j in J] + [f"eff{j}" for j in J]
                         + [f"qref{j}" for j in J] + [f"tff{j}" for j in J] + ["arm_status", "ctrl_mode", "mode_feed", "enabled"])
         self.t0 = time.time()
+        self.imu = None
+        if a.imu:  # 손목 D455 IMU 동시 기록(VIB D0) — 시각은 epoch, .t0로 맞춤
+            with open(self.path.replace(".csv", ".t0"), "w") as m:
+                m.write(f"{self.t0:.6f}\n")
+            self.imu = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "imu_rec.py"),
+                                         self.path.replace(".csv", ".imu.csv")])
+            time.sleep(2.0)
+            if self.imu.poll() is not None:
+                raise SystemExit("★ IMU 기록이 시작되지 않음 — --imu 없이 하거나 손목캠 확인")
         self.dump = None
         if a.go and not a.fake:  # CAN 원본 기록 — candump 시각(epoch) − t0 = CSV t
             with open(self.path.replace(".csv", ".t0"), "w") as m:
@@ -385,6 +394,7 @@ def main():
     ap.add_argument("--hz", type=float, default=0.25)
     ap.add_argument("--cycles", type=float, default=3.0)
     ap.add_argument("--can", default="can_piper")
+    ap.add_argument("--imu", action="store_true", help="손목 D455 IMU 동시 기록(tools/imu_rec.py)")
     a = ap.parse_args()
     if a.amp > 10:
         raise SystemExit("사인파 진폭은 10° 이하로")
@@ -415,9 +425,11 @@ def main():
         pr.f.close()
         if pr.dump:
             pr.dump.terminate()
+        if pr.imu:
+            pr.imu.terminate(); pr.imu.wait(timeout=3)
         if pr.tdc:
             pr.tdc.close()
-    print(f"결과: {res}\n기록: {pr.path}" + (f"\nCAN 원본: {pr.path.replace('.csv', '.candump')}" if pr.dump else ""))
+    print(f"결과: {res}\n기록: {pr.path}" + (f"\nIMU: {pr.path.replace('.csv', '.imu.csv')}" if pr.imu else "") + (f"\nCAN 원본: {pr.path.replace('.csv', '.candump')}" if pr.dump else ""))
     if a.go and not a.fake:
         print("팔은 비상 정지(천천히 내려앉음) 상태입니다. 받친 채로 clear_arm_fault.py로 복구한 뒤 다음 실험을 하세요.")
 
