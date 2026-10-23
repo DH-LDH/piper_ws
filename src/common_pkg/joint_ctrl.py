@@ -33,6 +33,7 @@ class JointCtrlCfg:
     eta_lo: float = 100.0        # SS-ASMC η 하한
     eta_hi: float = 2000.0       # SS-ASMC η 상한
     mu: float = 200.0            # SS-ASMC |K̂ 변화율| 상한
+    dist_mode: str = "accel"     # dist_comp 토크를 다음 TDE에 넘길지 — accel: τ_prev에 포함(M̄·가속도 명령처럼 작동), torque: 빼고 넘김(TDE가 외란으로 보고 상쇄)
 
 
 class JointCtrl:
@@ -44,7 +45,7 @@ class JointCtrl:
         self.qd_prev = None; self.qdd_f = 0.0
         self.pd_fw_prev = 0.0
         self.k_hat = 0.0; self.eta = cfg.eta_lo  # 적응 스위칭 게인 K̂, SS-ASMC 갱신 파라미터 η̂(하한에서 시작)
-        self._e = self._ed = 0.0
+        self._e = self._ed = 0.0; self._extra = 0.0
 
     def _accel(self, qd, h):  # 속도 차분 + 1차 저역통과
         if self.qd_prev is not None:
@@ -102,9 +103,9 @@ class JointCtrl:
         extra = self.dist_comp(out) if self.dist_comp is not None else 0.0
         out["dist"] = extra
         out["tau"] = tde + pd + sw + extra
-        self._e, self._ed = e, ed
+        self._e, self._ed = e, ed; self._extra = extra
         return out
 
     def commit(self, tau_sent):  # 상위에서 포화한 뒤 실제로 보낸 토크 → 다음 주기 TDE
-        self.tau_prev = float(tau_sent)
+        self.tau_prev = float(tau_sent) - (self._extra if self.c.dist_mode == "torque" else 0.0)
         self.pd_fw_prev = self.c.kp_fw * self._e + self.c.kd_fw * self._ed if self.c.hybrid else 0.0
