@@ -297,6 +297,9 @@ class Probe:
                                   f"{vo['v']:.5f}", f"{vo['wy']:.5f}", f"{vo['ey']:.5f}", f"{vo['vf']:.5f}", f"{vo['vhat']:.5f}",
                                   f"{vo['raw']:.5f}", f"{vo['tau']:.5f}", int(vo["enabled"]), "" if vo["tilt"] is None else f"{vo['tilt']:.2f}",
                                   vo["rejects"], vo["stale"], vd.c.k])
+                if vo["tripped"] is not None and not getattr(self, "_trip_said", False):
+                    self._trip_said = True
+                    print(f"★ τ_vib 감시: 0.5 s에 포화 10회 이상({vo['tripped']:.1f} s) → τ_vib 끔, 시행은 k = 0으로 계속", flush=True)
                 if vo["tilt"] is not None and not getattr(self, "_gate_said", False):
                     self._gate_said = True
                     print(f"기울기 게이트: {vo['tilt']:.2f}° → " + ("τ_vib 켬" if vo["enabled"] else f"★ {a.vib_gate}° 미만, τ_vib 끔(k = 0으로 진행)"), flush=True)

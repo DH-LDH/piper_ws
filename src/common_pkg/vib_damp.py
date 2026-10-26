@@ -53,6 +53,7 @@ class VibDamp:
         self.acc = []; self.tilt = None; self.enabled = False
         self.v = self.vf = self.vfd = 0.0; self.wy = self.ey = 0.0
         self.tau = 0.0; self.stale_n = 0
+        self.hist = collections.deque(maxlen=50); self.tripped = None  # 감시: 최근 50주기(0.5 s) 중 포화 10회 이상이면 τ_vib 영구 끔(10-26 k 0.2 25 Hz 리밋 사이클)
         self.n_samples = self.n_reject = self.n_stale = self.n_cycles = self.n_badtime = 0
 
     def _add_encoder(self, t, q, qd):  # 한 주기 점프 > 문턱인 관절을 튐 후보로 — 판정은 자이로 표본 처리 때
@@ -141,6 +142,12 @@ class VibDamp:
             tau = float(np.clip(raw, -c.tau_max, c.tau_max)) if self.enabled else 0.0
         if c.deadband and abs(tau) < TAU_STEP / 2:
             tau = 0.0
+        self.hist.append(abs(tau) >= 0.9 * c.tau_max)
+        if self.tripped is None and sum(self.hist) >= 10:
+            self.tripped = t_mit
+        if self.tripped is not None:
+            tau = 0.0
         self.tau = tau
         return dict(v=self.v, wy=self.wy, ey=self.ey, vf=self.vf, vhat=vhat, raw=raw, tau=tau, enabled=self.enabled,
-                    tilt=self.tilt, age=age, t_g=self.t_g, n_new=len(gyro_samples), rejects=self.n_reject, stale=self.n_stale)
+                    tilt=self.tilt, age=age, t_g=self.t_g, n_new=len(gyro_samples), rejects=self.n_reject, stale=self.n_stale,
+                    tripped=self.tripped)
