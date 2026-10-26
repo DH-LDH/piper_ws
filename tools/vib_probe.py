@@ -128,7 +128,9 @@ class Vib:
         q, qd, eff, en, st = s
         hj = getattr(p.GetArmJointMsgs(), "Hz", float("nan")); hh = getattr(p.GetArmHighSpdInfoMsgs(), "Hz", float("nan"))
         print(f"현재 q[deg] {np.degrees(q).round(1)} | enable {en.astype(int)} | status {st} | 피드백 관절 {hj:.0f} Hz, 고속 {hh:.0f} Hz")
-        if a.resume and a.go and en.all() and st[0] == 0 and st[1] == 0:  # 8절 10/26 저녁 11번: 대기(자세 유지)에서 0x02 복구 1회 → 아래 MotionCtrl_2
+        if a.resume:  # 10-26 실기: 대기에서 0x02 → 6축 Enable 해제, 팔 낙하(J2 121→167°) — 다시 쓰지 않음
+            raise SystemExit("★ --resume 사용 금지: 대기 모드에서 0x02는 모터를 해제해 팔이 떨어짐(VIB_E4 5절)")
+        if False:  # 8절 10/26 저녁 11번: 대기(자세 유지)에서 0x02 복구 1회 → 아래 MotionCtrl_2
             print("대기 모드 → 0x02(복구) 1회 송신, 1 s 대기")
             p.EmergencyStop(0x02); time.sleep(1.0)
             s = read_state(p); q, qd, eff, en, st = s
@@ -229,7 +231,7 @@ def main():
     ap.add_argument("--rate", type=float, default=200.0, help="기록 주기[Hz]")
     ap.add_argument("--send-rate", type=float, default=100.0, help="JointCtrl 송신 주기[Hz]")
     ap.add_argument("--can", default="can_piper")
-    ap.add_argument("--resume", action="store_true", help="대기 모드(ctrl_mode 0, Enable)에서 0x02 복구 1회 뒤 시작 — 받친 상태에서만")
+    ap.add_argument("--resume", action="store_true", help="사용 금지 — 10-26 대기 모드에서 0x02가 모터를 해제해 팔이 떨어짐")
     a = ap.parse_args()
     if a.stage == "goto" and (a.target is None or not 0 < a.vmax <= 10):
         raise SystemExit("goto는 --target 6개 필요, --vmax는 10°/s 이하")
