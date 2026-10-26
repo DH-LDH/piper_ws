@@ -321,14 +321,12 @@ class Probe:
         while time.time() < t_end:
             p.JointCtrl(*tgt)
             s = read_state(p); self.log("endpos", s, q_hold, np.zeros(6))
-            if s[4][1] != 1:  # 10-26 실기: MIT를 빠져나오면 펌웨어가 대기(ctrl_mode 0)로 감 → CAN 제어 위치 모드 다시 요청
-                p.MotionCtrl_2(0x01, 0x01, 10, 0x00)
             r = self.check(s, q_hold, "endpos")
             if r:
                 return r
             time.sleep(dt)
-        st = read_state(p)[4]
-        return None if st[2] != 0x04 and st[1] == 1 else f"전환 미완료(ctrl_mode {st[1]}, mode_feed {st[2]})"
+        st = read_state(p)[4]  # V1.7-3: MIT를 빠져나오면 대기(ctrl_mode 0, Enable 유지·자세 유지)로 감, MotionCtrl_2 반복으로도 CAN 제어 복귀 안 됨(10-26)
+        return None if st[2] != 0x04 else f"전환 미완료(ctrl_mode {st[1]}, mode_feed {st[2]})"
 
 
 def chirp(a, tt):  # MIT 진입 뒤 --chirp-start s부터 로그 스윕 f0→f1, --chirp-dur 동안, 앞뒤 0.5 s 진폭 램프
@@ -597,7 +595,7 @@ def main():
         print_tilt(pr.path)
     if a.go and not a.fake:
         if "위치 모드 전환 |" in res:
-            print("팔은 위치 모드로 유지 자세에 있습니다. 붙이기(J2 +3° 갔다 오기) 뒤 다음 시행을 바로 할 수 있습니다.")
+            print("팔은 대기 모드(Enable 유지)로 유지 자세에 서 있습니다 — 내려앉지 않음. 다음 시행 전 clear_arm_fault → traj_test 필요.")
         else:
             print("팔은 비상 정지(천천히 내려앉음) 상태입니다. 받친 채로 clear_arm_fault.py로 복구한 뒤 다음 실험을 하세요.")
 

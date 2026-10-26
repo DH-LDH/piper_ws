@@ -128,8 +128,8 @@ class Vib:
         q, qd, eff, en, st = s
         hj = getattr(p.GetArmJointMsgs(), "Hz", float("nan")); hh = getattr(p.GetArmHighSpdInfoMsgs(), "Hz", float("nan"))
         print(f"현재 q[deg] {np.degrees(q).round(1)} | enable {en.astype(int)} | status {st} | 피드백 관절 {hj:.0f} Hz, 고속 {hh:.0f} Hz")
-        if not en.all() or st[0] != 0 or st[1] not in (0, 1):  # 0 = 대기: mit_probe --end-pos 뒤 펌웨어가 MIT에서 대기로 빠짐, 아래 MotionCtrl_2로 CAN 제어 복귀
-            raise SystemExit("★ 팔이 위치 모드(CAN 제어)로 Enable된 상태가 아님 — traj_test로 자세를 잡은 뒤 실행")
+        if not en.all() or st[0] != 0 or st[1] != 1:  # 대기(0)는 MotionCtrl_2로 CAN 제어에 안 돌아옴(10-26 실기) → 복구 절차 필요
+            raise SystemExit("★ 팔이 위치 모드(CAN 제어)로 Enable된 상태가 아님 — clear_arm_fault → traj_test로 자세를 잡은 뒤 실행")
         q0 = self.q0 = q.copy()
         if a.stage == "goto":
             d = np.array(a.target) - np.degrees(q0)
