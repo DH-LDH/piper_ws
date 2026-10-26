@@ -276,3 +276,8 @@ k = 0.2 짝 1회(AB): 복구 → 기울기 ≥ 35° → `python3 tools/mit_probe
 1. 복구 → 기울기 → a′ 건강 확인: `vib_probe --stage slow --joints 2 3 --amp 5 --hz 0.25 --cycles 3 --imu --note slow_j23_poseA_health --go`
 2. 고주파 개루프 처프(k = 0): `mit_probe --stage hold --hold 28 --tdc --hybrid --joint 2 --mbar 0.01 --dist-mode torque --vib-joint 2 --vib-k 0 --chirp-joint 2 --chirp-amp 0.12 --chirp-f0 4 --chirp-f1 40 --chirp-dur 24 --chirp-start 2 --dev-limit 6 --speed-consec 10 --go` → `vib_chirp_cl.py <csv> --fmax 40`
 3. |L| < 0.3(20–40 Hz)인 k까지만 → k = 0.2 AB(lead 0) → ∠(−C) ±15° 확인 → φ_lead → …
+
+### 10-1. 정정·확인 (8절 10/26 밤 6)
+- 9절 "매 제어 주기 부호가 뒤집힘(약 25 Hz)" → **"약 2주기(20 ms)마다 부호 반전, 주기 약 40 ms = 25 Hz"**로 정정. 172154 회 마지막 구간 반전 간격은 주로 2주기(18–26 ms), 가끔 1주기.
+- 실제 루프 주기(CSV t 간격, MIT 구간): 134825 중앙 10.2 ms·95% 14.4·최대 41.9(96 Hz), 170304·171405·172154·172544 중앙 10.4–10.5 ms·95% 16.5–17.4·최대 49–70(89–91 Hz). τ_vib 켠 회가 약 6% 느리지만 100 Hz 근처 → 리밋 사이클은 나이퀴스트(약 45 Hz) 발진이 아님.
+- 고주파 개루프 처프 상한: 실제 나이퀴스트 약 45 Hz의 0.8배 = **36 Hz**로 한다(`--chirp-f1 36`, 분석 `--fmax 36`). 25 Hz 이상 구간(30–50 Hz 서보 떨림이 걸침)에서 감시가 평소보다 일찍 걸리면 중단하고 상한 25 Hz로 다시 한다.
