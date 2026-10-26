@@ -53,7 +53,7 @@ class VibDamp:
         self.acc = []; self.tilt = None; self.enabled = False
         self.v = self.vf = self.vfd = 0.0; self.wy = self.ey = 0.0
         self.tau = 0.0; self.stale_n = 0
-        self.n_samples = self.n_reject = self.n_stale = self.n_cycles = 0
+        self.n_samples = self.n_reject = self.n_stale = self.n_cycles = self.n_badtime = 0
 
     def _add_encoder(self, t, q, qd):  # 한 주기 점프 > 문턱인 관절을 튐 후보로 — 판정은 자이로 표본 처리 때
         qd = np.asarray(qd, float)
@@ -118,6 +118,8 @@ class VibDamp:
         c = self.c
         self._add_encoder(now, q, qd); self.n_cycles += 1
         for t_g, g in gyro_samples:
+            if t_g > now + 0.05 or (self.t_g is not None and t_g <= self.t_g):  # 미래·역행 시각(도메인 전환 잔재) 표본은 버림
+                self.n_badtime += 1; continue
             self._sample(t_g, g)
         if self.tilt is None:  # 게이트 창: 원시 가속도 모아 기울기 → 문턱 판정, 그 전엔 τ_vib = 0
             if c.gate_win[0] <= t_mit <= c.gate_win[1] and accel_raw is not None:

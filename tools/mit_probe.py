@@ -306,7 +306,7 @@ class Probe:
         if tds:
             td = np.array(tds); self.td_stats = (f"Td(자이로 표본 → τ_vib 송신, 하한) 중앙 {np.median(td):.1f} ms · 95% {np.percentile(td, 95):.1f} · 최대 {td.max():.1f}"
                                                  f" | 엔코더 튐 거부 {vd.n_reject}회 · 묵은 표본(> {a.vib_age_max:.0f} ms) {vd.n_stale}/{vd.n_cycles}주기"
-                                                 f" · 자이로 표본 {vd.n_samples}")
+                                                 f" · 자이로 표본 {vd.n_samples} · 시각 이상 버림 {vd.n_badtime}")
         # 4) 종료 — 정상 종료 + --end-pos면 위치 모드로 전환(처짐 상태 유지 시험), 아니면·문제가 있으면 비상 정지(천천히 내려앉힘)
         if a.end_pos and not reason:
             r2 = self.end_position(q_hold, dt)

@@ -41,7 +41,10 @@ class ImuStream:
         k = "a" if m.get_profile().stream_type() == rs.stream.accel else "g"
         d = m.get_motion_data(); ht = time.time(); dt = m.get_timestamp()
         with self.lock:
-            self.offs.append(ht - dt / 1000.0)
+            oi = ht - dt / 1000.0
+            if self.off is not None and abs(oi - self.off) > 1.0:  # 장치 시각 도메인 전환(10-26 낙하 뒤: 하드웨어 → epoch ms) — 새 도메인으로 오프셋 다시
+                self.offs.clear(); self.off = None; self.n_domain = getattr(self, "n_domain", 0) + 1
+            self.offs.append(oi)
             if self.n[k] % 20 == 0 or self.off is None:  # 창 중앙값에서 1 s 안의 최솟값 — 장치 시각 도메인이 바뀐 첫 표본 같은 튀는 값 제외
                 med = sorted(self.offs)[len(self.offs) // 2]
                 self.off = min(x for x in self.offs if abs(x - med) < 1.0)
