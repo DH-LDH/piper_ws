@@ -128,7 +128,15 @@ class Vib:
         q, qd, eff, en, st = s
         hj = getattr(p.GetArmJointMsgs(), "Hz", float("nan")); hh = getattr(p.GetArmHighSpdInfoMsgs(), "Hz", float("nan"))
         print(f"현재 q[deg] {np.degrees(q).round(1)} | enable {en.astype(int)} | status {st} | 피드백 관절 {hj:.0f} Hz, 고속 {hh:.0f} Hz")
-        if not en.all() or st[0] != 0 or st[1] != 1:  # 대기(0)는 MotionCtrl_2로 CAN 제어에 안 돌아옴(10-26 실기) → 복구 절차 필요
+        if a.resume and a.go and en.all() and st[0] == 0 and st[1] == 0:  # 8절 10/26 저녁 11번: 대기(자세 유지)에서 0x02 복구 1회 → 아래 MotionCtrl_2
+            print("대기 모드 → 0x02(복구) 1회 송신, 1 s 대기")
+            p.EmergencyStop(0x02); time.sleep(1.0)
+            s = read_state(p); q, qd, eff, en, st = s
+            print(f"0x02 뒤 q[deg] {np.degrees(q).round(1)} | enable {en.astype(int)} | status {st}")
+            if not en.all() or st[0] != 0:
+                p.MotionCtrl_1(0x01, 0, 0)
+                raise SystemExit("★ 0x02 뒤 Enable·상태 이상 — 비상 정지 송신")
+        elif not en.all() or st[0] != 0 or st[1] != 1:  # 대기(0)는 MotionCtrl_2만으로 CAN 제어에 안 돌아옴(10-26 실기) → 복구 절차 필요
             raise SystemExit("★ 팔이 위치 모드(CAN 제어)로 Enable된 상태가 아님 — clear_arm_fault → traj_test로 자세를 잡은 뒤 실행")
         q0 = self.q0 = q.copy()
         if a.stage == "goto":
@@ -221,6 +229,7 @@ def main():
     ap.add_argument("--rate", type=float, default=200.0, help="기록 주기[Hz]")
     ap.add_argument("--send-rate", type=float, default=100.0, help="JointCtrl 송신 주기[Hz]")
     ap.add_argument("--can", default="can_piper")
+    ap.add_argument("--resume", action="store_true", help="대기 모드(ctrl_mode 0, Enable)에서 0x02 복구 1회 뒤 시작 — 받친 상태에서만")
     a = ap.parse_args()
     if a.stage == "goto" and (a.target is None or not 0 < a.vmax <= 10):
         raise SystemExit("goto는 --target 6개 필요, --vmax는 10°/s 이하")

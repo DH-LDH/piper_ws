@@ -94,6 +94,12 @@ class ImuStream:
             return None, None, None
         return g[0], g[2:], (a[2:] if a is not None else None)
 
+    def gyro_after(self, t):  # → [(표본 시각, 자이로 xyz)] 표본 시각 > t 인 것 전부(시각 순), 최신 가속도 — τ_vib가 표본마다 처리
+        with self.lock:
+            g = [(r[0], r[2:]) for r in self.buf["g"] if t is None or r[0] > t]
+            a = self.a
+        return g[-40:], (a[2:] if a is not None else None)
+
     def gap_stats(self):  # 스트림별 (표본 수, 빈틈 수, 빈틈 합 ms, 최대 ms)
         with self.lock:
             return {k: (self.n[k], len(v), sum(v), max(v) if v else 0.0) for k, v in self.gaps.items()}
