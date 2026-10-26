@@ -84,7 +84,7 @@ class Probe:
             self.vw_f = open(self.path.replace(".csv", ".vib.csv"), "w", newline="")
             self.vw = csv.writer(self.vw_f)
             self.vw.writerow(["t", "t_gyro", "td_ms", "age_ms", "n_new", "v", "wy", "ey", "vf", "vhat", "raw", "tau_vib", "enabled", "tilt",
-                              "rejects", "stale"])
+                              "rejects", "stale", "k"])
         elif a.imu:  # 손목 D455 IMU 동시 기록(VIB D0) — 시각은 epoch, .t0로 맞춤
             with open(self.path.replace(".csv", ".t0"), "w") as m:
                 m.write(f"{self.t0:.6f}\n")
@@ -224,8 +224,9 @@ class Probe:
                                           kp_fw=self.kp[j6], kd_fw=self.kd[j6], switch=sw, sw_k=a.sw_k, sw_phi=a.sw_phi,
                                           k_max=a.k_max, eps=a.eps, phi=a.phi, alpha=a.alpha, delta=a.delta, gamma=a.gamma,
                                           a_exp=a.a_exp, eta_lo=a.eta_lo, eta_hi=a.eta_hi, mu=a.mu, dist_mode=a.dist_mode), tff[j6],
-                             dist_comp=(lambda o: chirp_now["v"]) if a.chirp_joint == a.joint
-                             else (lambda o: self.vib_now["v"]) if a.vib_joint == a.joint else None)
+                             dist_comp=(lambda o: dist_now["v"]) if a.joint in (a.chirp_joint, a.vib_joint) else None)
+        same = bool(a.chirp_joint and a.chirp_joint == a.vib_joint)  # 처프 + τ_vib 같은 관절: 합에 포화(8절 10/26 밤 2)
+        dist_now = {"v": 0.0}; self.n_sat = 0; k_switched = False
         vd = None; tds = []
         if a.vib_joint:
             from imu_frame import ImuToBase
@@ -241,12 +242,16 @@ class Probe:
             if tt > dur:
                 break
             qr = q_hold.copy(); vr = np.zeros(6); ar = 0.0
-            if a.stage == "sine" and tt > hold_s:  # 진폭을 2 s 동안 0→A로 올림(급출발 방지)
+            if a.stage == "sine" and tt > hold_s:  # 진폭을 2 s 동안 0→A로 올림(급출발 방지), --sine-joints면 여러 관절 같은 위상(a′)
                 ts = tt - hold_s; ramp = min(1.0, ts / 2.0)
                 w = 2 * math.pi * a.hz; A = math.radians(a.amp) * ramp
-                qr[j6] = q_hold[j6] + A * math.sin(w * ts)
-                vr[j6] = A * w * math.cos(w * ts)
-                ar = -A * w * w * math.sin(w * ts)
+                for jj in ([j - 1 for j in a.sine_joints] if a.sine_joints else [j6]):
+                    qr[jj] = q_hold[jj] + A * math.sin(w * ts)
+                    vr[jj] = A * w * math.cos(w * ts)
+                ar = -A * w * w * math.sin(w * ts) if (not a.sine_joints or a.joint in a.sine_joints) else 0.0
+            if vd is not None and a.vib_k_switch and not k_switched and tt >= a.vib_k_switch:  # 한 MIT 시행 안 k 짝(같은 처짐)
+                vd.c.k = a.vib_k2; k_switched = True
+                print(f"k 전환 {a.vib_k} → {a.vib_k2} ({tt:.1f} s)", flush=True)
             if not beeped and tt >= a.beep:
                 print("\a▶ 지금 툭", flush=True); beeped = True
             chirp_now["v"] = chirp(a, tt) if a.chirp_joint else 0.0
@@ -256,6 +261,11 @@ class Probe:
             if vd is not None:  # τ_vib — 새 자이로 표본 전부를 표본 시각 기준으로 처리, 송신 직전 시각으로 예측
                 gs, ac = self.stream.gyro_after(vd.t_g)
                 vo = vd.step(tt, time.time(), s[0], s[1], gs, ac); self.vib_now["v"] = vo["tau"]
+            if same:
+                c = chirp_now["v"] + self.vib_now["v"]; cc = float(np.clip(c, -a.vib_sum_max, a.vib_sum_max))
+                self.n_sat += int(cc != c); dist_now["v"] = cc
+            else:
+                dist_now["v"] = chirp_now["v"] if a.chirp_joint == a.joint else self.vib_now["v"]
             if self.ext_kp is not None:
                 tau = tau + self.ext_kp * (qr - s[0])
             if self.ext_kd is not None:
@@ -265,10 +275,13 @@ class Probe:
                 t_prev = now
                 co = ctrl.step(s[0][j6], s[1][j6], qr[j6], vr[j6], ar, h)
                 tau[j6] = co["tau"]
-            if a.chirp_joint and a.chirp_joint != a.joint or (a.chirp_joint and self.tdc is None):
-                tau[a.chirp_joint - 1] += chirp_now["v"]
-            if a.vib_joint and (a.vib_joint != a.joint or self.tdc is None):
-                tau[a.vib_joint - 1] += self.vib_now["v"]
+            if same and (a.chirp_joint != a.joint or self.tdc is None):
+                tau[a.chirp_joint - 1] += dist_now["v"]
+            elif not same:
+                if a.chirp_joint and a.chirp_joint != a.joint or (a.chirp_joint and self.tdc is None):
+                    tau[a.chirp_joint - 1] += chirp_now["v"]
+                if a.vib_joint and (a.vib_joint != a.joint or self.tdc is None):
+                    tau[a.vib_joint - 1] += self.vib_now["v"]
             if self.ext_kp is not None or self.ext_kd is not None or self.tdc is not None or a.chirp_joint or a.vib_joint:
                 tau = np.clip(tau, -TAU_CMD_LIMIT, TAU_CMD_LIMIT)
             if self.tdc is not None:
@@ -283,7 +296,7 @@ class Probe:
                 self.vw.writerow([f"{now - self.t0:.4f}", f"{vo['t_g'] - self.t0:.4f}", f"{td:.2f}", f"{vo['age'] * 1000:.2f}", vo["n_new"],
                                   f"{vo['v']:.5f}", f"{vo['wy']:.5f}", f"{vo['ey']:.5f}", f"{vo['vf']:.5f}", f"{vo['vhat']:.5f}",
                                   f"{vo['raw']:.5f}", f"{vo['tau']:.5f}", int(vo["enabled"]), "" if vo["tilt"] is None else f"{vo['tilt']:.2f}",
-                                  vo["rejects"], vo["stale"]])
+                                  vo["rejects"], vo["stale"], vd.c.k])
                 if vo["tilt"] is not None and not getattr(self, "_gate_said", False):
                     self._gate_said = True
                     print(f"기울기 게이트: {vo['tilt']:.2f}° → " + ("τ_vib 켬" if vo["enabled"] else f"★ {a.vib_gate}° 미만, τ_vib 끔(k = 0으로 진행)"), flush=True)
@@ -306,7 +319,10 @@ class Probe:
         if tds:
             td = np.array(tds); self.td_stats = (f"Td(자이로 표본 → τ_vib 송신, 하한) 중앙 {np.median(td):.1f} ms · 95% {np.percentile(td, 95):.1f} · 최대 {td.max():.1f}"
                                                  f" | 엔코더 튐 거부 {vd.n_reject}회 · 묵은 표본(> {a.vib_age_max:.0f} ms) {vd.n_stale}/{vd.n_cycles}주기"
-                                                 f" · 자이로 표본 {vd.n_samples} · 시각 이상 버림 {vd.n_badtime}")
+                                                 f" · 자이로 표본 {vd.n_samples} · 시각 이상 버림 {vd.n_badtime}"
+                                                 + (f" | 처프+τ_vib 합 포화 {self.n_sat}/{vd.n_cycles}주기" if same else "")
+                                                 + (f" | ★ IMU 시각 도메인 전환 {self.stream.n_domain}회 — k > 0 구간이 있으면 이 회 무효"
+                                                    if getattr(self.stream, "n_domain", 0) else ""))
         # 4) 종료 — 정상 종료 + --end-pos면 위치 모드로 전환(처짐 상태 유지 시험), 아니면·문제가 있으면 비상 정지(천천히 내려앉힘)
         if a.end_pos and not reason:
             r2 = self.end_position(q_hold, dt)
@@ -333,7 +349,9 @@ class Probe:
         return None if st[2] != 0x04 else f"전환 미완료(ctrl_mode {st[1]}, mode_feed {st[2]})"
 
 
-def chirp(a, tt):  # MIT 진입 뒤 --chirp-start s부터 로그 스윕 f0→f1, --chirp-dur 동안, 앞뒤 0.5 s 진폭 램프
+def chirp(a, tt):  # MIT 진입 뒤 --chirp-start s부터 로그 스윕 f0→f1, --chirp-dur 동안, 앞뒤 0.5 s 진폭 램프 — --vib-k-switch면 전환 뒤 한 번 더
+    if getattr(a, "vib_k_switch", 0) and tt >= a.vib_k_switch:
+        tt -= a.vib_k_switch
     t = tt - a.chirp_start; T = a.chirp_dur
     if t < 0 or t > T:
         return 0.0
@@ -555,18 +573,25 @@ def main():
     ap.add_argument("--vib-gate", type=float, default=35.0, help="MIT 시작 기울기가 이보다 작으면 τ_vib 끔[deg]")
     ap.add_argument("--vib-deadband", action="store_true", help="|τ_vib| < 반 칸이면 0")
     ap.add_argument("--vib-max", type=float, default=0.3, help="τ_vib 포화[N·m]")
-    ap.add_argument("--vib-pred", type=float, default=8.1, help="조화 예측 주파수[Hz] — 표본 나이만큼 앞당김, 0이면 예측 안 함")
+    ap.add_argument("--vib-pred", type=float, default=8.0, help="조화 예측 주파수[Hz] — 표본 나이만큼 앞당김, 0이면 예측 안 함(처프 피크 8.0, 8절 10/26 밤 2)")
+    ap.add_argument("--vib-k2", type=float, default=0.0, help="--vib-k-switch 뒤 k")
+    ap.add_argument("--vib-k-switch", type=float, default=0.0, help="MIT 진입 뒤 이 시각[s]에 k → --vib-k2, 처프는 전환 뒤 한 번 더(같은 처짐에서 짝 비교)")
+    ap.add_argument("--vib-sum-max", type=float, default=0.3, help="처프 + τ_vib 합 포화[N·m]")
+    ap.add_argument("--sine-joints", type=int, nargs="*", default=[], help="--stage sine을 여러 관절 같은 위상으로(a′: 2 3)")
     ap.add_argument("--vib-age-max", type=float, default=60.0, help="표본 나이 상한[ms] — 넘으면 직전 τ 유지 후 반씩 줄임")
     ap.add_argument("--fake-td-file", default="", help="가짜 IMU: 실기 .vib.csv의 td_ms 시퀀스를 표본 나이로 재생(수신 몰림 재현)")
     ap.add_argument("--fake-encspike", action="store_true", help="가짜 팔: 1.5 s마다 J3 엔코더 속도만 한 주기 튐")
-    ap.add_argument("--ppf-f", type=float, default=8.1); ap.add_argument("--ppf-zeta", type=float, default=0.3)
+    ap.add_argument("--ppf-f", type=float, default=8.0); ap.add_argument("--ppf-zeta", type=float, default=0.3)
     ap.add_argument("--end-pos", action="store_true", help="정상 종료 시 비상 정지 대신 위치 모드로 전환(처짐 상태 유지 시험)")
     ap.add_argument("--fake-tilt", type=float, default=36.0, help="가짜 IMU 정지 기울기[deg]")
     ap.add_argument("--fake-tap", type=float, default=5.0, help="가짜 IMU 모드에 툭(속도 충격)을 넣을 MIT 시각[s], 0이면 없음")
     ap.add_argument("--fake-delay", type=float, default=10.0, help="가짜 IMU 자이로 전달 지연[ms]")
     a = ap.parse_args()
-    if a.vib_joint and (a.chirp_joint or a.vib_max > 0.5 or (a.vib_joint == a.joint and a.tdc and a.dist_mode != "torque")):
-        raise SystemExit("τ_vib는 처프와 같이 쓰지 않음, 포화 0.5 N·m 이하, TDC 관절이면 --dist-mode torque(8절 10/26)")
+    if a.vib_joint and ((a.chirp_joint and a.chirp_joint != a.vib_joint) or a.vib_max > 0.5 or a.vib_sum_max > 0.5
+                        or (a.vib_joint == a.joint and a.tdc and a.dist_mode != "torque")):
+        raise SystemExit("τ_vib: 처프는 같은 관절만, 포화 0.5 N·m 이하, TDC 관절이면 --dist-mode torque(8절 10/26)")
+    if a.vib_k_switch and (not a.vib_joint or (a.chirp_joint and (a.hold < 2 * a.vib_k_switch or a.chirp_start + a.chirp_dur > a.vib_k_switch))):
+        raise SystemExit("--vib-k-switch T: τ_vib 필요, 처프면 --hold ≥ 2T이고 처프는 한 구간(chirp-start + chirp-dur ≤ T) 안에")
     if a.amp > 10:
         raise SystemExit("사인파 진폭은 10° 이하로")
     if a.chirp_joint and (a.chirp_amp > 0.25 or a.stage != "hold" or a.hold < a.chirp_start + a.chirp_dur):

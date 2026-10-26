@@ -29,9 +29,9 @@ class VibDampCfg:
     gate_win: tuple = (0.3, 1.8)  # MIT 진입 뒤 기울기 평균 창[s] — 이 창이 끝나야 τ_vib 시작
     deadband: bool = False
     tau_max: float = 0.3       # 안전 포화[N·m]
-    ppf_f: float = 8.1         # ω_f/2π[Hz] — k=0 툭 자유진동 8.1–8.2 Hz(E4)
+    ppf_f: float = 8.0         # ω_f/2π[Hz] — 처프 강제응답 피크(E3 F1·F3)
     ppf_zeta: float = 0.3
-    pred_f: float = 8.1        # 조화 예측 주파수[Hz], 0이면 예측 안 함
+    pred_f: float = 8.0        # 조화 예측 주파수[Hz], 0이면 예측 안 함 — 처프 피크(E3 F1·F3)
     age_max: float = 0.06      # 표본 나이 상한[s]
 
 
