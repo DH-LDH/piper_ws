@@ -315,11 +315,15 @@ class Probe:
                 if (mm_t > a.mismatch_ms / 1000.0).any():
                     j = int(mm_t.argmax())
                     reason = f"명령 무시 J{j + 1}: 보낸 τ {sent[j]:+.2f} vs effort {s[2][j]:+.2f} N·m, {mm_t[j] * 1000:.0f} ms 지속"
-            sent = tau.copy(); t_last = now
+            sent = tau.copy()
+            if t_last is not None and now - t_last > 0.03:  # 루프 멈춤 — 그동안 τ 유지라 예측 보상 안 됨(8 Hz에서 70 ms = 200°)
+                self.n_gap30 = getattr(self, "n_gap30", 0) + 1; self.gap_max = max(getattr(self, "gap_max", 0.0), now - t_last)
+            t_last = now
             if reason:
                 break
             time.sleep(max(0.0, dt - (time.time() - now)))
         self.spikes = self.spike_n  # 순간 튐: 1주기라도 속도 한계 초과
+        print(f"루프 멈춤 30 ms 초과 {getattr(self, 'n_gap30', 0)}회 (최대 {getattr(self, 'gap_max', 0.0) * 1000:.0f} ms) — 수십 회면 원인 확인(8절 10/26 밤 7)")
         if tds:
             td = np.array(tds); self.td_stats = (f"Td(자이로 표본 → τ_vib 송신, 하한) 중앙 {np.median(td):.1f} ms · 95% {np.percentile(td, 95):.1f} · 최대 {td.max():.1f}"
                                                  f" | 엔코더 튐 거부 {vd.n_reject}회 · 묵은 표본(> {a.vib_age_max:.0f} ms) {vd.n_stale}/{vd.n_cycles}주기"
