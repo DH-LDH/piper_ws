@@ -17,6 +17,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "common_pkg"))
 from joint_ctrl import JointCtrl, JointCtrlCfg  # noqa: E402
+from vib_damp import VibDamp, VibDampCfg  # noqa: E402
 
 DEV_LIMIT_DEG = 3.0       # 기준 대비 이탈 한계
 SPEED_LIMIT = 0.5         # [rad/s] 관절 속도 한계(10-06 0xAD 튐은 3~9 rad/s)
@@ -63,10 +64,27 @@ class Probe:
         J = range(1, 7)
         self.w.writerow(["t", "phase"] + [f"q{j}" for j in J] + [f"qd{j}" for j in J] + [f"eff{j}" for j in J]
                         + [f"qref{j}" for j in J] + [f"tff{j}" for j in J] + ["arm_status", "ctrl_mode", "mode_feed", "enabled"]
-                        + (["chirp"] if a.chirp_joint else []))
+                        + (["chirp"] if a.chirp_joint else []) + (["tau_vib"] if a.vib_joint else []))
         self.t0 = time.time()
-        self.imu = None
-        if a.imu:  # 손목 D455 IMU 동시 기록(VIB D0) — 시각은 epoch, .t0로 맞춤
+        self.imu = None; self.stream = None; self.imu_f = None
+        if a.vib_joint:  # τ_vib: 실시간 수신이 IMU 기록도 맡음(장치는 한 프로세스만 잡음) — 형식은 imu_rec와 같음
+            with open(self.path.replace(".csv", ".t0"), "w") as m:
+                m.write(f"{self.t0:.6f}\n")
+            self.imu_f = open(self.path.replace(".csv", ".imu.csv"), "w", newline="")
+            iw = csv.writer(self.imu_f); iw.writerow(["t", "t_dev", "stream", "x", "y", "z"])
+            if a.fake:
+                self.stream = FakeImu(p, a, iw)
+            else:
+                from imu_stream import ImuStream
+                self.stream = ImuStream(log=iw)
+            hz = self.stream.start(); time.sleep(1.0)
+            if self.stream.latest_gyro()[0] is None:
+                raise SystemExit("★ 실시간 IMU 표본이 안 들어옴 — 손목캠 확인")
+            print(f"실시간 IMU: 가속도 {hz[0]} Hz, 자이로 {hz[1]} Hz → {self.path.replace('.csv', '.imu.csv')}")
+            self.vw_f = open(self.path.replace(".csv", ".vib.csv"), "w", newline="")
+            self.vw = csv.writer(self.vw_f)
+            self.vw.writerow(["t", "t_gyro", "td_ms", "v", "wy", "ey", "vf", "raw", "tau_vib", "enabled", "tilt"])
+        elif a.imu:  # 손목 D455 IMU 동시 기록(VIB D0) — 시각은 epoch, .t0로 맞춤
             with open(self.path.replace(".csv", ".t0"), "w") as m:
                 m.write(f"{self.t0:.6f}\n")
             self.imu = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "imu_rec.py"),
@@ -94,11 +112,14 @@ class Probe:
             self.tw = csv.writer(self.tdc)
             self.tw.writerow(["t", "e", "ed", "qdd_f", "ar", "tau_prev", "tde", "pd", "sw", "tau", "K", "eta"])
 
+    vib_now = {"v": 0.0}
+
     def log(self, phase, s, qref, tff, chirp_v=None):
         q, qd, eff, en, st = s
         self.w.writerow([f"{time.time() - self.t0:.4f}", phase] + list(np.degrees(q).round(4)) + list(qd.round(4))
                         + list(eff.round(4)) + list(np.degrees(qref).round(4)) + list(np.round(tff, 4))
-                        + list(st) + [int(en.all())] + ([] if not self.a.chirp_joint else [f"{chirp_v or 0.0:.5f}"]))
+                        + list(st) + [int(en.all())] + ([] if not self.a.chirp_joint else [f"{chirp_v or 0.0:.5f}"])
+                        + ([] if not self.a.vib_joint else [f"{self.vib_now['v']:.5f}"]))
 
     def check(self, s, qref, phase, t_mit=None, vref=None):  # 중단 사유 문자열 또는 None
         q, qd, eff, en, st = s
@@ -176,6 +197,14 @@ class Probe:
                 print(f"[dry-run] 처프 J{a.chirp_joint}: ±{a.chirp_amp} N·m, {a.chirp_f0}–{a.chirp_f1} Hz 로그 스윕 {a.chirp_dur} s, "
                       f"MIT {a.chirp_start} s부터, 경로 {path}"
                       + (" — 실제 토크는 TDE 반응으로 처프와 달라짐(10-24 가짜 팔: accel 최대 7배, torque 저주파 1/4·중간 3.3배)" if path != "τ_ff 직접" else " — 보낸 토크 = 처프"))
+            if a.vib_joint:
+                from vib_damp import bp_phase_deg
+                print(f"[dry-run] τ_vib J{a.vib_joint}: {a.vib_law} k {a.vib_k}, 대역 {a.vib_band[0]}–{a.vib_band[1]} Hz(8 Hz 위상 "
+                      f"{bp_phase_deg(tuple(a.vib_band), 8.0, a.rate):+.1f}°), 게이트 기울기 ≥ {a.vib_gate}°, 포화 ±{a.vib_max} N·m"
+                      + (", 데드밴드 반 칸" if a.vib_deadband else "") + (f", PPF {a.ppf_f} Hz ζ {a.ppf_zeta}" if a.vib_law == "ppf" else "")
+                      + ", 경로 " + ("dist_comp(torque)" if a.vib_joint == a.joint and a.tdc else "τ_ff 직접"))
+            if a.end_pos:
+                print("[dry-run] 정상 종료 시 비상 정지 대신 위치 모드로 전환(유지 자세 목표, 2 s 감시)")
             print("[dry-run] 명령은 하나도 보내지 않음. 실제 실행은 --go")
             return "dry-run"
         # 3) MIT 전환 + 6축 유지(+사인파)
@@ -194,7 +223,15 @@ class Probe:
                                           kp_fw=self.kp[j6], kd_fw=self.kd[j6], switch=sw, sw_k=a.sw_k, sw_phi=a.sw_phi,
                                           k_max=a.k_max, eps=a.eps, phi=a.phi, alpha=a.alpha, delta=a.delta, gamma=a.gamma,
                                           a_exp=a.a_exp, eta_lo=a.eta_lo, eta_hi=a.eta_hi, mu=a.mu, dist_mode=a.dist_mode), tff[j6],
-                             dist_comp=(lambda o: chirp_now["v"]) if a.chirp_joint == a.joint else None)
+                             dist_comp=(lambda o: chirp_now["v"]) if a.chirp_joint == a.joint
+                             else (lambda o: self.vib_now["v"]) if a.vib_joint == a.joint else None)
+        vd = None; tds = []; t_vprev = None
+        if a.vib_joint:
+            from imu_frame import ImuToBase
+            from piper_kin import PiperKin
+            kin = PiperKin()
+            vd = VibDamp(kin, ImuToBase(kin), VibDampCfg(law=a.vib_law, k=a.vib_k, band=tuple(a.vib_band), gate_deg=a.vib_gate,
+                                                         deadband=a.vib_deadband, tau_max=a.vib_max, ppf_f=a.ppf_f, ppf_zeta=a.ppf_zeta))
         sent = None; mm_t = np.zeros(6); t_last = None
         beeped = not a.beep
         while True:
@@ -213,6 +250,11 @@ class Probe:
             chirp_now["v"] = chirp(a, tt) if a.chirp_joint else 0.0
             s = read_state(p)  # 읽기 → 계산 → 송신 (우리 P가 최신 위치를 쓰도록)
             tau = tff.copy()
+            vo = None
+            if vd is not None:  # τ_vib — 최신 자이로 표본, 시각은 Td 측정용
+                tg, gr, ac = self.stream.latest_gyro()
+                hv = (now - t_vprev) if t_vprev is not None else 0.0; t_vprev = now
+                vo = vd.step(tt, s[0], s[1], gr, ac, hv); self.vib_now["v"] = vo["tau"]
             if self.ext_kp is not None:
                 tau = tau + self.ext_kp * (qr - s[0])
             if self.ext_kd is not None:
@@ -224,7 +266,9 @@ class Probe:
                 tau[j6] = co["tau"]
             if a.chirp_joint and a.chirp_joint != a.joint or (a.chirp_joint and self.tdc is None):
                 tau[a.chirp_joint - 1] += chirp_now["v"]
-            if self.ext_kp is not None or self.ext_kd is not None or self.tdc is not None or a.chirp_joint:
+            if a.vib_joint and (a.vib_joint != a.joint or self.tdc is None):
+                tau[a.vib_joint - 1] += self.vib_now["v"]
+            if self.ext_kp is not None or self.ext_kd is not None or self.tdc is not None or a.chirp_joint or a.vib_joint:
                 tau = np.clip(tau, -TAU_CMD_LIMIT, TAU_CMD_LIMIT)
             if self.tdc is not None:
                 self.tw.writerow([f"{now - self.t0:.4f}", f"{co['e']:.6f}", f"{co['ed']:.5f}", f"{co['qdd_f']:.4f}", f"{ar:.5f}",
@@ -233,6 +277,14 @@ class Probe:
                 ctrl.commit(tau[j6])  # 포화 후 값 — 실제 보낸 토크로 다음 TDE
             for j in range(6):
                 p.JointMitCtrl(j + 1, float(qr[j]), float(vr[j]), float(self.kp[j]), float(self.kd[j]), float(tau[j]) + TAU_STEP / 2)
+            if vo is not None:  # Td = 이 주기 JointMitCtrl 송신 완료 − 쓴 자이로 표본 시각(장치 시각 + 최소 오프셋 → 하한)
+                td = (time.time() - tg) * 1000; tds.append(td)
+                self.vw.writerow([f"{now - self.t0:.4f}", f"{tg - self.t0:.4f}", f"{td:.2f}", f"{vo['v']:.5f}", f"{vo['wy']:.5f}",
+                                  f"{vo['ey']:.5f}", f"{vo['vf']:.5f}", f"{vo['raw']:.5f}", f"{vo['tau']:.5f}", int(vo["enabled"]),
+                                  "" if vo["tilt"] is None else f"{vo['tilt']:.2f}"])
+                if vo["tilt"] is not None and not getattr(self, "_gate_said", False):
+                    self._gate_said = True
+                    print(f"기울기 게이트: {vo['tilt']:.2f}° → " + ("τ_vib 켬" if vo["enabled"] else f"★ {a.vib_gate}° 미만, τ_vib 끔(k = 0으로 진행)"), flush=True)
             self.log("mit", s, qr, tau, chirp_now["v"] if a.chirp_joint else None)
             if np.abs(s[1] - (vr if a.speed_err else 0.0)).max() > SPEED_LIMIT and self.fast_n == 0:
                 self.spike_n += 1
@@ -249,11 +301,32 @@ class Probe:
                 break
             time.sleep(max(0.0, dt - (time.time() - now)))
         self.spikes = self.spike_n  # 순간 튐: 1주기라도 속도 한계 초과
-        # 4) 종료 — 첫 실험은 위치 모드로 되돌리지 않고 비상 정지(천천히 내려앉힘)
+        if tds:
+            td = np.array(tds); self.td_stats = f"Td(자이로 표본 → τ_vib 송신, 하한) 중앙 {np.median(td):.1f} ms · 95% {np.percentile(td, 95):.1f} · 최대 {td.max():.1f}"
+        # 4) 종료 — 정상 종료 + --end-pos면 위치 모드로 전환(처짐 상태 유지 시험), 아니면·문제가 있으면 비상 정지(천천히 내려앉힘)
+        if a.end_pos and not reason:
+            r2 = self.end_position(q_hold, dt)
+            if r2 is None:
+                return f"정상 종료 → 위치 모드 전환 | 순간 튐(1주기라도 {SPEED_LIMIT} rad/s 초과) {self.spikes}회"
+            reason = f"위치 모드 전환 중 {r2}"
         p.MotionCtrl_1(0x01, 0, 0)
         for _ in range(int(1.0 / dt)):
             self.log("estop", read_state(p), q_hold, np.zeros(6)); time.sleep(dt)
         return (f"중단: {reason}" if reason else "정상 종료") + f" | 순간 튐(1주기라도 {SPEED_LIMIT} rad/s 초과) {self.spikes}회"
+
+    def end_position(self, q_hold, dt, watch_s=2.0):  # MIT → 위치 모드(유지 자세 목표, 10%) 후 watch_s 감시 → 문제 사유 또는 None
+        p = self.p; tgt = [round(v * 1000) for v in np.degrees(q_hold)]
+        p.JointCtrl(*tgt); p.MotionCtrl_2(0x01, 0x01, 10, 0x00)
+        t_end = time.time() + watch_s
+        while time.time() < t_end:
+            p.JointCtrl(*tgt)
+            s = read_state(p); self.log("endpos", s, q_hold, np.zeros(6))
+            r = self.check(s, q_hold, "endpos")
+            if r:
+                return r
+            time.sleep(dt)
+        st = read_state(p)[4]
+        return None if st[2] != 0x04 else "모드 피드백이 여전히 MOVE M(4)"
 
 
 def chirp(a, tt):  # MIT 진입 뒤 --chirp-start s부터 로그 스윕 f0→f1, --chirp-dur 동안, 앞뒤 0.5 s 진폭 램프
@@ -339,6 +412,55 @@ def make_fake(kick=False, modedrop=False, refzero=False, friction=False):  # 가
     return Fake()
 
 
+class FakeImu:  # 가짜 팔용 IMU — 8 Hz 피치 모드(J2 τ로 구동, 툭 충격) + 강체 J_ω q̇, 전달 지연, 정지 기울기 — 부호·게이트 로직 시험용(모델 아님)
+    def __init__(s, arm, a, log, f0=8.0, zeta=0.03, b=6.0):
+        from imu_frame import ImuToBase
+        from link_est import jacobians
+        from piper_kin import PiperKin
+        s.arm, s.a, s.log = arm, a, log; s.kin = PiperKin(); s.tb = ImuToBase(s.kin); s.jac = jacobians
+        s.w = 2 * math.pi * f0; s.z = zeta; s.b = b; s.x = s.xd = 0.0; s.hist = []; s.t = None; s.tap_done = False; s.t_mit = None
+        s.tau0 = None
+
+    def start(s):
+        s.t = time.time(); return (63, 200)
+
+    def stop(s):
+        pass
+
+    def gap_stats(s):
+        return {"a": (0, 0, 0, 0), "g": (0, 0, 0, 0)}
+
+    def _adv(s):  # 5 ms 표본으로 모드 적분(J2 τ − 진입 τ로 구동), 기록 — 호출이 뜸하면 밀린 구간은 건너뜀
+        now = time.time()
+        if s.arm.mit and s.t_mit is None:
+            s.t_mit = now
+        s.t = max(s.t, now - 0.05)
+        while s.t + 0.005 <= now:
+            s.t += 0.005; arm = s.arm
+            tau2 = arm.cmd.get(1, (0, 0, 0, 0, 0))[4] if arm.mit else 0.0
+            if arm.mit and s.tau0 is None:
+                s.tau0 = tau2
+            u = (tau2 - s.tau0) if s.tau0 is not None else 0.0
+            if s.a.fake_tap and s.t_mit is not None and not s.tap_done and s.t - s.t_mit >= s.a.fake_tap:
+                s.xd += 0.3; s.tap_done = True
+            s.xd += 0.005 * (s.b * u - 2 * s.z * s.w * s.xd - s.w * s.w * s.x); s.x += 0.005 * s.xd
+            Jw, _ = s.jac(s.kin, arm.q, s.tb.R_l6)
+            wb = Jw @ arm.qd + np.array([0.0, s.xd, 0.0]); R = s.tb.rot(arm.q)
+            g_raw = R.T @ wb; tl = math.radians(s.a.fake_tilt); a_raw = 9.67 * np.array([0.0, math.sin(tl), -math.cos(tl)])
+            s.hist.append((s.t, g_raw, a_raw))
+            if s.log is not None:
+                s.log.writerow((f"{s.t:.6f}", f"{s.t * 1000:.3f}", "g", *[f"{v:.5f}" for v in g_raw]))
+                s.log.writerow((f"{s.t:.6f}", f"{s.t * 1000:.3f}", "a", *[f"{v:.5f}" for v in a_raw]))
+        s.hist = s.hist[-400:]
+
+    def latest_gyro(s):
+        s._adv(); due = time.time() - s.a.fake_delay / 1000.0
+        for t, g, ac in reversed(s.hist):
+            if t <= due:
+                return t, g, ac
+        return None, None, None
+
+
 def print_tilt(path):  # 링크 처짐 상태(VIB_E3·8절 10/26): MIT 시작·끝 1.5 s의 IMU 정지 기울기 — 엔코더가 같아도 회마다 2–4° 다름
     try:
         from imu_frame import static_tilt
@@ -409,7 +531,21 @@ def main():
     ap.add_argument("--chirp-f0", type=float, default=2.0); ap.add_argument("--chirp-f1", type=float, default=20.0)
     ap.add_argument("--chirp-dur", type=float, default=20.0); ap.add_argument("--chirp-start", type=float, default=2.0)
     ap.add_argument("--beep", type=float, default=0.0, help="MIT 진입 뒤 이 시각[s]에 툭 신호 표시(VIB D0 조건 b), 0이면 없음")
+    ap.add_argument("--vib-joint", type=int, default=0, help="τ_vib를 넣을 관절(0이면 없음) — --tdc --joint와 같으면 dist_comp(torque)")
+    ap.add_argument("--vib-law", choices=["vel", "ppf"], default="vel")
+    ap.add_argument("--vib-k", type=float, default=0.0, help="vel: N·m/(rad/s), ppf: N·m/rad — 0이면 계산·기록만(기준선)")
+    ap.add_argument("--vib-band", type=float, nargs=2, default=[4.0, 16.0], help="변형 속도 대역통과[Hz]")
+    ap.add_argument("--vib-gate", type=float, default=35.0, help="MIT 시작 기울기가 이보다 작으면 τ_vib 끔[deg]")
+    ap.add_argument("--vib-deadband", action="store_true", help="|τ_vib| < 반 칸이면 0")
+    ap.add_argument("--vib-max", type=float, default=0.3, help="τ_vib 포화[N·m]")
+    ap.add_argument("--ppf-f", type=float, default=8.0); ap.add_argument("--ppf-zeta", type=float, default=0.3)
+    ap.add_argument("--end-pos", action="store_true", help="정상 종료 시 비상 정지 대신 위치 모드로 전환(처짐 상태 유지 시험)")
+    ap.add_argument("--fake-tilt", type=float, default=36.0, help="가짜 IMU 정지 기울기[deg]")
+    ap.add_argument("--fake-tap", type=float, default=5.0, help="가짜 IMU 모드에 툭(속도 충격)을 넣을 MIT 시각[s], 0이면 없음")
+    ap.add_argument("--fake-delay", type=float, default=10.0, help="가짜 IMU 자이로 전달 지연[ms]")
     a = ap.parse_args()
+    if a.vib_joint and (a.chirp_joint or a.vib_max > 0.5 or (a.vib_joint == a.joint and a.tdc and a.dist_mode != "torque")):
+        raise SystemExit("τ_vib는 처프와 같이 쓰지 않음, 포화 0.5 N·m 이하, TDC 관절이면 --dist-mode torque(8절 10/26)")
     if a.amp > 10:
         raise SystemExit("사인파 진폭은 10° 이하로")
     if a.chirp_joint and (a.chirp_amp > 0.25 or a.stage != "hold" or a.hold < a.chirp_start + a.chirp_dur):
@@ -441,6 +577,9 @@ def main():
         pr.f.close()
         if pr.dump:
             pr.dump.terminate()
+        if pr.stream is not None:
+            pr.stream.stop(); pr.imu_f.close(); pr.vw_f.close()
+            print("IMU 빈틈(표본 수, 빈틈 수, 합 ms, 최대 ms):", pr.stream.gap_stats())
         if pr.imu:
             pr.imu.terminate()
             try:
@@ -450,10 +589,15 @@ def main():
         if pr.tdc:
             pr.tdc.close()
     print(f"결과: {res}\n기록: {pr.path}" + (f"\nIMU: {pr.path.replace('.csv', '.imu.csv')}" if pr.imu else "") + (f"\nCAN 원본: {pr.path.replace('.csv', '.candump')}" if pr.dump else ""))
-    if pr.imu:
+    if getattr(pr, "td_stats", None):
+        print(pr.td_stats)
+    if pr.imu or pr.stream is not None:
         print_tilt(pr.path)
     if a.go and not a.fake:
-        print("팔은 비상 정지(천천히 내려앉음) 상태입니다. 받친 채로 clear_arm_fault.py로 복구한 뒤 다음 실험을 하세요.")
+        if "위치 모드 전환 |" in res:
+            print("팔은 위치 모드로 유지 자세에 있습니다. 붙이기(J2 +3° 갔다 오기) 뒤 다음 시행을 바로 할 수 있습니다.")
+        else:
+            print("팔은 비상 정지(천천히 내려앉음) 상태입니다. 받친 채로 clear_arm_fault.py로 복구한 뒤 다음 실험을 하세요.")
 
 
 if __name__ == "__main__":

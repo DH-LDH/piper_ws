@@ -87,6 +87,13 @@ class ImuStream:
         now = time.time()
         return a[2:], g[2:], now - min(a[0], g[0])
 
+    def latest_gyro(self):  # → (표본 시각[PC 시계로 환산한 장치 시각], 자이로 xyz, 가속도 xyz) — τ_vib 지연 Td 측정용
+        with self.lock:
+            a, g = self.a, self.g
+        if g is None:
+            return None, None, None
+        return g[0], g[2:], (a[2:] if a is not None else None)
+
     def gap_stats(self):  # 스트림별 (표본 수, 빈틈 수, 빈틈 합 ms, 최대 ms)
         with self.lock:
             return {k: (self.n[k], len(v), sum(v), max(v) if v else 0.0) for k, v in self.gaps.items()}
