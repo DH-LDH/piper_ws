@@ -18,7 +18,7 @@ from scipy import signal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src", "common_pkg")); sys.path.insert(0, HERE)
-from imu_frame import ImuToBase  # noqa: E402
+from imu_frame import ImuToBase, static_tilt  # noqa: E402
 from link_est import jacobians  # noqa: E402
 from piper_kin import PiperKin  # noqa: E402
 import vib_d2_estimator as E  # noqa: E402
@@ -35,14 +35,6 @@ def despike(t, x, thr=0.5, pad=0.03):  # |x − 중앙값 필터| > thr 인 표�
     if m.any() and (~m).sum() > 2:
         y[m] = np.interp(t[m], t[~m], x[~m])
     return y, t[bad]
-
-
-def static_tilt(f, t1, t2):  # IMU 원시 가속도 정지 평균 → atan2(y, −z)[deg] (카메라 좌표, 장치 시각)
-    i = pd.read_csv(f.replace(".csv", ".imu.csv")); t0 = float(open(f.replace(".csv", ".t0")).read())
-    off = i.t.values - i.t_dev.values / 1000; ok = np.abs(off - np.median(off)) < 1.0
-    i = i[ok].copy(); i["t"] = i.t_dev / 1000 + np.percentile(off[ok], 1) - t0
-    w = i[(i.stream == "a") & (i.t > t1) & (i.t < t2)]; g = w[["x", "y", "z"]].mean().values
-    return math.degrees(math.atan2(g[1], -g[2]))
 
 
 def lockin(tu, c, u, ys, spikes, fmin=2.5, fmax=19.0, step=10):  # 창마다 처프 위상으로 복조 → [(f, τ/처프, {이름: y/τ})]
@@ -78,10 +70,11 @@ def analyze(f, kin, tb):
     u = E.band(np.interp(tu, m.t.values, m[f"tff{J}"].values), 1.5, 25); c = np.interp(tu, m.t.values, m.chirp.values)
     enc = np.array([jacobians(kin, q, tb.R_l6)[0][1] @ qd for q, qd in zip(Q, QD)])
     ys = {"gyro": E.band(G[:, 1], 1.5, 25), "enc": E.band(enc, 1.5, 25), "qdJ": E.band(QD[:, J - 1], 1.5, 25)}
+    ys["defl"] = ys["gyro"] - ys["enc"]  # 변형 속도 = τ_vib가 줄일 대상(강체 회전 몫 제외)
     rows = lockin(tu, c, u, ys, sp)
     tr = pd.DataFrame([(r[0], abs(r[1])) for r in rows], columns=["f", "r"])
     return dict(name=os.path.basename(f)[:15], J=J, tilt=static_tilt(f, t1, t1 + 1.5), nsp=len(sp), amp=np.abs(m.chirp).max(),
-                gyro=binned(rows, "gyro"), enc=binned(rows, "enc"), qdJ=binned(rows, "qdJ"),
+                gyro=binned(rows, "gyro"), enc=binned(rows, "enc"), qdJ=binned(rows, "qdJ"), defl=binned(rows, "defl"),
                 tau=tr.groupby((tr.f * 4).round() / 4).r.median())
 
 
@@ -95,17 +88,22 @@ def main():
     for n, f in enumerate(a.csv):
         r = analyze(f, kin, tb); r["label"] = a.label[n] if n < len(a.label) else r["name"]; res.append(r)
         g = r["gyro"]; b = g[(g.index >= 5) & (g.index <= 9)]; ip = b.mag.idxmax(); r["peak"] = (ip, b.mag[ip])
+        dfl = r["defl"]; bd = dfl[(dfl.index >= 5) & (dfl.index <= 9)]; idp = bd.mag.idxmax(); r["dpeak"] = (idp, bd.mag[idp], bd.ph[idp])
         print(f"\n{r['label']} | J{r['J']} ±{r['amp']:.2f} | 정지 기울기 {r['tilt']:.2f}° | 튐 {r['nsp']}표본"
-              f" | 자이로 피크 {ip:.2f} Hz |H| {b.mag[ip]:.3f} ∠{np.degrees(b.ph[ip]):+.0f}°")
-        print("  f[Hz]  τ/처프  gyro |H| ∠      enc |H|  qdJ |H|   (rad/s per N·m)")
+              f" | 자이로 피크 {ip:.2f} Hz |H| {b.mag[ip]:.3f} ∠{np.degrees(b.ph[ip]):+.0f}°"
+              f" | 변형 피크 {idp:.2f} Hz |H| {bd.mag[idp]:.3f} ∠{np.degrees(bd.ph[idp]):+.0f}°")
+        print("  f[Hz]  τ/처프  gyro |H| ∠      enc |H|  qdJ |H|  defl |H| ∠    (rad/s per N·m)")
         for fq in REPORT_F:
             if fq in g.index:
                 print(f"  {fq:5.2f}  {r['tau'].get(fq, np.nan):5.2f}  {g.mag[fq]:6.3f} {np.degrees(g.ph[fq]):+5.0f}°"
-                      f"  {r['enc'].mag.get(fq, np.nan):6.3f}  {r['qdJ'].mag.get(fq, np.nan):6.3f}")
+                      f"  {r['enc'].mag.get(fq, np.nan):6.3f}  {r['qdJ'].mag.get(fq, np.nan):6.3f}"
+                      f"  {r['defl'].mag.get(fq, np.nan):6.3f} {np.degrees(r['defl'].ph.get(fq, np.nan)):+5.0f}°")
     for J in sorted({r["J"] for r in res}):
         rr = [r for r in res if r["J"] == J]
         if len(rr) > 2:
-            print(f"\nJ{J} 정지 기울기–피크 |H| 순위상관(Spearman) {pd.Series([r['tilt'] for r in rr]).corr(pd.Series([r['peak'][1] for r in rr]), method='spearman'):.2f} ({len(rr)}회)")
+            tl = pd.Series([r["tilt"] for r in rr])
+            print(f"\nJ{J} 정지 기울기–피크 |H| 순위상관(Spearman) 자이로 {tl.corr(pd.Series([r['peak'][1] for r in rr]), method='spearman'):.2f}"
+                  f" · 변형 {tl.corr(pd.Series([r['dpeak'][1] for r in rr]), method='spearman'):.2f} ({len(rr)}회)")
     if a.out:
         import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
         joints = sorted({r["J"] for r in res})
@@ -119,10 +117,11 @@ def main():
             ax[1, k].set_ylabel("phase [deg]"); ax[1, k].set_xlabel("Hz"); ax[0, k].legend(fontsize=7)
             [x.grid(alpha=.3) for x in ax[:, k]]
         for r in res:
+            ax[0, -1].plot(r["tilt"], r["dpeak"][1], "x", color="C0" if r["J"] == 2 else "C3")
             ax[0, -1].plot(r["tilt"], r["peak"][1], "o" if r["J"] == 2 else "s", color="C0" if r["J"] == 2 else "C3")
             ax[0, -1].annotate(r["label"], (r["tilt"], r["peak"][1]), fontsize=7)
         ax[0, -1].set_xlabel("static tilt at chirp start [deg] (IMU atan2(y,−z))"); ax[0, -1].set_ylabel("peak |H| 5–9 Hz")
-        ax[0, -1].set_title("response vs link tilt (o J2, □ J5)"); ax[0, -1].grid(alpha=.3); ax[1, -1].axis("off")
+        ax[0, -1].set_title("response vs link tilt (o/□ gyro, x deflection; blue J2, red J5)"); ax[0, -1].grid(alpha=.3); ax[1, -1].axis("off")
         fig.tight_layout(); fig.savefig(a.out, dpi=110); print("그림:", a.out)
 
 

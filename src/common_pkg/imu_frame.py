@@ -27,6 +27,18 @@ def r_link6_imu(pitch_deg=MOUNT_PITCH_DEG, roll_deg=MOUNT_ROLL_DEG):
     return Ry(math.radians(pitch_deg)) @ Rz(math.radians(roll_deg))
 
 
+def static_tilt(csv_path, t1, t2):  # 기록 파일(.imu.csv·.t0) 정지 가속도 평균 → atan2(y, −z)[deg], 장치 시각 — 링크 처짐 상태 지표(VIB_E3)
+    import pandas as pd
+    i = pd.read_csv(csv_path.replace(".csv", ".imu.csv")); t0 = float(open(csv_path.replace(".csv", ".t0")).read())
+    off = i.t.values - i.t_dev.values / 1000; ok = np.abs(off - np.median(off)) < 1.0
+    i = i[ok].copy(); i["t"] = i.t_dev / 1000 + np.percentile(off[ok], 1) - t0
+    w = i[(i.stream == "a") & (i.t > t1) & (i.t < t2)]
+    if len(w) < 20:
+        return float("nan")
+    g = w[["x", "y", "z"]].mean().values
+    return math.degrees(math.atan2(g[1], -g[2]))
+
+
 class ImuToBase:
     def __init__(self, kin, pitch_deg=MOUNT_PITCH_DEG, roll_deg=MOUNT_ROLL_DEG, g=G):
         self.kin = kin; self.R_l6 = r_link6_imu(pitch_deg, roll_deg); self.g = g

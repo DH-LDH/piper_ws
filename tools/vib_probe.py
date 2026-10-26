@@ -185,6 +185,16 @@ class Vib:
         return "정상 종료 — 위치 모드로 " + ("목표" if a.stage == "goto" else "시작") + " 자세 유지 중"
 
 
+def print_end_tilt(path):  # 끝 정지 1.5 s의 IMU 기울기 — 자세 A 진입 방향별 처짐 상태 비교(8절 10/26 붙이기 절차)
+    try:
+        from imu_frame import static_tilt
+        with open(path) as f:
+            t = [float(r["t"]) for r in csv.DictReader(f)]
+        print(f"링크 정지 기울기(끝 1.5 s, IMU atan2(y,−z), 33° 이상이 E3 '켜진' 쪽): {static_tilt(path, t[-1] - 1.5, t[-1]):.2f}°")
+    except Exception as e:  # 참고값 — 실패해도 실험에는 영향 없음
+        print(f"링크 정지 기울기 계산 실패: {e}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", choices=["tap", "step", "slow", "goto"], required=True)
@@ -249,6 +259,8 @@ def main():
                     sp.kill()
     print(f"결과: {res}\n기록: {v.path}" + (f"\nIMU: {v.path.replace('.csv', '.imu.csv')}" if v.imu else "")
           + (f"\nCAN 원본: {v.path.replace('.csv', '.candump')}" if v.dump else ""))
+    if v.imu and a.go:
+        print_end_tilt(v.path)
 
 
 if __name__ == "__main__":

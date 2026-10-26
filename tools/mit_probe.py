@@ -339,6 +339,23 @@ def make_fake(kick=False, modedrop=False, refzero=False, friction=False):  # 가
     return Fake()
 
 
+def print_tilt(path):  # 링크 처짐 상태(VIB_E3·8절 10/26): MIT 시작·끝 1.5 s의 IMU 정지 기울기 — 엔코더가 같아도 회마다 2–4° 다름
+    try:
+        from imu_frame import static_tilt
+        with open(path) as f:
+            rows = [(float(r["t"]), r["phase"]) for r in csv.DictReader(f)]
+        tm = [t for t, ph in rows if ph == "mit"]; ts = [t for t, ph in rows if ph == "settle"]
+        out = []
+        if ts:
+            out.append(f"정지 확인 {static_tilt(path, ts[0], ts[-1]):.2f}°")
+        if tm:
+            out.append(f"MIT 시작 {static_tilt(path, tm[0] + 0.3, tm[0] + 1.8):.2f}°")
+            out.append(f"MIT 끝 {static_tilt(path, tm[-1] - 1.5, tm[-1]):.2f}°")
+        print("링크 정지 기울기(IMU atan2(y,−z), 33° 이상이 E3 '켜진' 쪽): " + " | ".join(out))
+    except Exception as e:  # 기울기는 참고값 — 실패해도 실험 결과에는 영향 없음
+        print(f"링크 정지 기울기 계산 실패: {e}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", choices=["hold", "sine"], default="hold")
@@ -433,6 +450,8 @@ def main():
         if pr.tdc:
             pr.tdc.close()
     print(f"결과: {res}\n기록: {pr.path}" + (f"\nIMU: {pr.path.replace('.csv', '.imu.csv')}" if pr.imu else "") + (f"\nCAN 원본: {pr.path.replace('.csv', '.candump')}" if pr.dump else ""))
+    if pr.imu:
+        print_tilt(pr.path)
     if a.go and not a.fake:
         print("팔은 비상 정지(천천히 내려앉음) 상태입니다. 받친 채로 clear_arm_fault.py로 복구한 뒤 다음 실험을 하세요.")
 
