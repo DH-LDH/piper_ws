@@ -128,7 +128,7 @@ class Vib:
         q, qd, eff, en, st = s
         hj = getattr(p.GetArmJointMsgs(), "Hz", float("nan")); hh = getattr(p.GetArmHighSpdInfoMsgs(), "Hz", float("nan"))
         print(f"현재 q[deg] {np.degrees(q).round(1)} | enable {en.astype(int)} | status {st} | 피드백 관절 {hj:.0f} Hz, 고속 {hh:.0f} Hz")
-        if not en.all() or st[0] != 0 or st[1] != 1:
+        if not en.all() or st[0] != 0 or st[1] not in (0, 1):  # 0 = 대기: mit_probe --end-pos 뒤 펌웨어가 MIT에서 대기로 빠짐, 아래 MotionCtrl_2로 CAN 제어 복귀
             raise SystemExit("★ 팔이 위치 모드(CAN 제어)로 Enable된 상태가 아님 — traj_test로 자세를 잡은 뒤 실행")
         q0 = self.q0 = q.copy()
         if a.stage == "goto":
@@ -155,7 +155,8 @@ class Vib:
             s = read_state(p); self.log("settle", s, q0)
             slow_n = slow_n + 1 if np.abs(s[1]).max() > SETTLE_SPEED else 0
             if np.degrees(np.abs(s[0] - q0)).max() > 0.5 or slow_n >= SPEED_CONSEC:
-                raise SystemExit(f"★ 위치 모드에서 정지 상태가 아님(이탈 {np.degrees(np.abs(s[0] - q0)).max():.2f}°) — 중단")
+                raise SystemExit(f"★ 위치 모드에서 정지 상태가 아님(이탈 {np.degrees(np.abs(s[0] - q0)).max():.2f}°, "
+                                 f"속도 J{int(np.abs(s[1]).argmax()) + 1} {np.abs(s[1]).max():.2f} rad/s) — 중단, 다시 실행하면 됨")
             time.sleep(dt)
         t_start = time.time(); dur = self.duration(); k = 0; beeped = False; reason = None  # 2) 본 시행
         while True:
