@@ -33,6 +33,22 @@ class VibDampCfg:
     ppf_zeta: float = 0.3
     pred_f: float = 8.0        # 조화 예측 주파수[Hz], 0이면 예측 안 함 — 처프 피크(E3 F1·F3)
     age_max: float = 0.06      # 표본 나이 상한[s]
+    pred_mode: str = "res"     # res: 공진기 뒤진 직교(8절 10/26 밤 5), old: 대역통과 + 앞선 직교(10-26 리밋 사이클 재현용)
+    res_q: float = 1.0         # 공진기 Q
+    hp_f: float = 1.0          # res 입력 1차 고역통과[Hz]
+    lead_deg: float = 0.0      # φ_lead — 회전각 θ = ω₀a + φ_lead
+    gate_hi: float = 37.0      # 기울기 상한(8절 10/26 밤 5: 위상 확인된 범위 35–37°)
+    hf_max: float = 0.02       # 감시: τ_vib 16 Hz 이상 rms(0.25 s) 상한[N·m]
+
+
+def pred_gain(f, a, cfg):  # 연속계 |v̂/x|·위상(지연 a 뒤 v 대비 아님, 입력 v 대비) — res·old 공통 검토용
+    s = 1j * 2 * math.pi * np.asarray(f, float); w0 = 2 * math.pi * cfg.pred_f; th = w0 * a + math.radians(cfg.lead_deg)
+    if cfg.pred_mode == "res":
+        hp = s / (s + 2 * math.pi * cfg.hp_f); eta = (w0 * w0 / cfg.res_q) / (s * s + (w0 / cfg.res_q) * s + w0 * w0) * hp
+        return (s * eta / w0) * math.cos(th) - eta * math.sin(th)
+    th_h = 1 / (2 * math.pi * cfg.band[0]); tl = 1 / (2 * math.pi * cfg.band[1])
+    HP = th_h * s / (1 + th_h * s); LP = 1 / (1 + tl * s)
+    return HP * LP * math.cos(th) + (HP - HP * LP) / tl / w0 * math.sin(th)
 
 
 def bp_phase_deg(band, f, fs):  # 아래 이산 대역통과(1차 HP·1차 LP, 고정 주기 1/fs)의 f에서 위상[deg]
@@ -48,12 +64,14 @@ class VibDamp:
         self.tl = 1 / (2 * math.pi * cfg.band[1]); self.th = 1 / (2 * math.pi * cfg.band[0])
         self.hp = 0.0; self.x_prev = None; self.lp = 0.0; self.t_g = None
         self.xi = 0.0; self.eta = 0.0; self.eta_d = 0.0
+        self.h1 = 0.0; self.x1_prev = None; self.r = 0.0; self.rd = 0.0  # res: 1 Hz 고역통과, 공진기 η·η'
         self.enc = collections.deque(maxlen=40)   # (t, q, q̇ 원값, 튐 후보 관절 bool[6])
         self.qd_good = None
         self.acc = []; self.tilt = None; self.enabled = False
         self.v = self.vf = self.vfd = 0.0; self.wy = self.ey = 0.0
         self.tau = 0.0; self.stale_n = 0
-        self.hist = collections.deque(maxlen=50); self.tripped = None  # 감시: 최근 50주기(0.5 s) 중 포화 10회 이상이면 τ_vib 영구 끔(10-26 k 0.2 25 Hz 리밋 사이클)
+        self.hist = collections.deque(maxlen=50); self.tripped = None; self.trip_why = ""  # 감시 ①: 최근 50주기(0.5 s) 중 포화 10회 이상(10-26 k 0.2 25 Hz 리밋 사이클)
+        self.hf = collections.deque(maxlen=25); self.thp = 0.0; self.t_prev_tau = 0.0; self.t_last = None  # 감시 ②: τ_vib 16 Hz 고역 rms(0.25 s) > hf_max — 성장 단계에서 끔
         self.n_samples = self.n_reject = self.n_stale = self.n_cycles = self.n_badtime = 0
 
     def _add_encoder(self, t, q, qd):  # 한 주기 점프 > 문턱인 관절을 튐 후보로 — 판정은 자이로 표본 처리 때
@@ -89,6 +107,17 @@ class VibDamp:
         self.lp += h / (self.tl + h) * (self.hp - self.lp)
         return self.lp, (self.hp - self.lp) / self.tl  # v_f, v̇_f(저역 단 미분, 지연 없음)
 
+    def _resonator(self, x, h):  # 1 Hz 고역통과 → η'' + (ω₀/Q)η' + ω₀²η = (ω₀²/Q)x, RK4(입력은 표본 사이 선형) — 오일러는 8 Hz에서 13° 앞섰음
+        if self.x1_prev is None:
+            self.x1_prev = x; self.u_prev = 0.0
+        a1 = 1 / (1 + 2 * math.pi * self.c.hp_f * h); self.h1 = a1 * (self.h1 + x - self.x1_prev); self.x1_prev = x
+        w0 = 2 * math.pi * self.c.pred_f; Q = self.c.res_q; u0, u1 = self.u_prev, self.h1; self.u_prev = u1
+        f = lambda r, rd, u: (rd, (w0 * w0 / Q) * u - (w0 / Q) * rd - w0 * w0 * r)
+        r, rd = self.r, self.rd; um = (u0 + u1) / 2
+        k1 = f(r, rd, u0); k2 = f(r + h / 2 * k1[0], rd + h / 2 * k1[1], um)
+        k3 = f(r + h / 2 * k2[0], rd + h / 2 * k2[1], um); k4 = f(r + h * k3[0], rd + h * k3[1], u1)
+        self.r = r + h / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]); self.rd = rd + h / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
+
     def _sample(self, t_g, g_raw):
         q, raw, held, cand = self._qd_at(t_g)
         Jw, _ = jacobians(self.kin, q, self.tb.R_l6)
@@ -101,7 +130,11 @@ class VibDamp:
         h = (t_g - self.t_g) if self.t_g is not None else 0.0
         self.t_g = t_g; self.wy, self.ey = wy, ey; self.v = wy - ey
         if 0 < h < 0.2:
-            self.vf, self.vfd = self._bandpass(self.v, h)
+            if self.c.pred_mode == "res":
+                self._resonator(self.v, h)
+                self.vf = self.rd / (2 * math.pi * self.c.pred_f)
+            else:
+                self.vf, self.vfd = self._bandpass(self.v, h)
             if self.c.law == "ppf":
                 self.xi += h * (self.vf - 2 * math.pi * 1.0 * self.xi)  # 누설 적분 — 변위형 입력
                 wf = 2 * math.pi * self.c.ppf_f
@@ -109,11 +142,15 @@ class VibDamp:
                 self.eta += h * self.eta_d
         self.n_samples += 1
 
-    def _predict(self, x, xd, a):
+    def _predict(self, x, xd, a):  # old: x·cos θ + (ẋ/ω)·sin θ
         if not self.c.pred_f:
             return x
-        w = 2 * math.pi * self.c.pred_f
-        return x * math.cos(w * a) + xd / w * math.sin(w * a)
+        w = 2 * math.pi * self.c.pred_f; th = w * a + math.radians(self.c.lead_deg)
+        return x * math.cos(th) + xd / w * math.sin(th)
+
+    def _predict_res(self, a):  # res: v̂ = (η'/ω₀)cos θ − η sin θ — 고주파에서 두 항 다 줄어듦
+        w = 2 * math.pi * self.c.pred_f; th = w * a + math.radians(self.c.lead_deg)
+        return self.rd / w * math.cos(th) - self.r * math.sin(th)
 
     def step(self, t_mit, now, q, qd, gyro_samples, accel_raw):
         c = self.c
@@ -128,9 +165,16 @@ class VibDamp:
             if t_mit > c.gate_win[1]:
                 g = np.mean(self.acc, axis=0) if self.acc else np.array([np.nan] * 3)
                 self.tilt = math.degrees(math.atan2(g[1], -g[2]))
-                self.enabled = bool(self.tilt >= c.gate_deg)
+                self.enabled = bool(c.gate_deg <= self.tilt <= c.gate_hi)
         age = (now - self.t_g) if self.t_g is not None else float("inf")
-        if c.law == "ppf":
+        if c.pred_mode == "res":
+            vhat = self._predict_res(age) if c.pred_f else self.vf
+            if c.law == "ppf":  # 공진기 η에 +k (PPF 구조) — η̂ = η cos θ + (η'/ω₀) sin θ
+                w = 2 * math.pi * c.pred_f; th = w * age + math.radians(c.lead_deg)
+                raw = c.k * (self.r * math.cos(th) + self.rd / w * math.sin(th))
+            else:
+                raw = -c.k * vhat
+        elif c.law == "ppf":
             raw = c.k * self._predict(self.eta, self.eta_d, age); vhat = self.vf
         else:
             vhat = self._predict(self.vf, self.vfd, age); raw = -c.k * vhat
@@ -143,11 +187,17 @@ class VibDamp:
         if c.deadband and abs(tau) < TAU_STEP / 2:
             tau = 0.0
         self.hist.append(abs(tau) >= 0.9 * c.tau_max)
+        dtc = (now - self.t_last) if self.t_last is not None else 0.01; self.t_last = now
+        ah = 1 / (1 + 2 * math.pi * 16.0 * dtc); self.thp = ah * (self.thp + tau - self.t_prev_tau); self.t_prev_tau = tau
+        self.hf.append(self.thp)
+        hf_rms = float(np.sqrt(np.mean(np.square(self.hf)))) if len(self.hf) == self.hf.maxlen else 0.0
         if self.tripped is None and sum(self.hist) >= 10:
-            self.tripped = t_mit
+            self.tripped = t_mit; self.trip_why = "0.5 s에 포화 10회 이상"
+        if self.tripped is None and hf_rms > c.hf_max:
+            self.tripped = t_mit; self.trip_why = f"16 Hz 이상 rms {hf_rms:.3f} > {c.hf_max} N·m"
         if self.tripped is not None:
             tau = 0.0
         self.tau = tau
         return dict(v=self.v, wy=self.wy, ey=self.ey, vf=self.vf, vhat=vhat, raw=raw, tau=tau, enabled=self.enabled,
                     tilt=self.tilt, age=age, t_g=self.t_g, n_new=len(gyro_samples), rejects=self.n_reject, stale=self.n_stale,
-                    tripped=self.tripped)
+                    tripped=self.tripped, trip_why=self.trip_why)

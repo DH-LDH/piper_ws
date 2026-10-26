@@ -234,7 +234,8 @@ class Probe:
             kin = PiperKin()
             vd = VibDamp(kin, ImuToBase(kin), VibDampCfg(law=a.vib_law, k=a.vib_k, band=tuple(a.vib_band), gate_deg=a.vib_gate,
                                                          deadband=a.vib_deadband, tau_max=a.vib_max, ppf_f=a.ppf_f, ppf_zeta=a.ppf_zeta,
-                                                         pred_f=a.vib_pred, age_max=a.vib_age_max / 1000.0))
+                                                         pred_f=a.vib_pred, age_max=a.vib_age_max / 1000.0, pred_mode=a.vib_pred_mode,
+                                                         res_q=a.vib_q, lead_deg=a.vib_lead_deg, gate_hi=a.vib_gate_hi, hf_max=a.vib_hf_max))
         sent = None; mm_t = np.zeros(6); t_last = None
         beeped = not a.beep
         while True:
@@ -299,10 +300,10 @@ class Probe:
                                   vo["rejects"], vo["stale"], vd.c.k])
                 if vo["tripped"] is not None and not getattr(self, "_trip_said", False):
                     self._trip_said = True
-                    print(f"★ τ_vib 감시: 0.5 s에 포화 10회 이상({vo['tripped']:.1f} s) → τ_vib 끔, 시행은 k = 0으로 계속", flush=True)
+                    print(f"★ τ_vib 감시: {vo['trip_why']}({vo['tripped']:.1f} s) → τ_vib 끔, 시행은 k = 0으로 계속", flush=True)
                 if vo["tilt"] is not None and not getattr(self, "_gate_said", False):
                     self._gate_said = True
-                    print(f"기울기 게이트: {vo['tilt']:.2f}° → " + ("τ_vib 켬" if vo["enabled"] else f"★ {a.vib_gate}° 미만, τ_vib 끔(k = 0으로 진행)"), flush=True)
+                    print(f"기울기 게이트: {vo['tilt']:.2f}° → " + ("τ_vib 켬" if vo["enabled"] else f"★ {a.vib_gate}–{a.vib_gate_hi}° 밖, τ_vib 끔(k = 0으로 진행 — 37° 초과면 그 상태 ∠H 기준선)"), flush=True)
             self.log("mit", s, qr, tau, chirp_now["v"] if a.chirp_joint else None)
             if np.abs(s[1] - (vr if a.speed_err else 0.0)).max() > SPEED_LIMIT and self.fast_n == 0:
                 self.spike_n += 1
@@ -393,7 +394,7 @@ def driver_running():  # 실제 드라이버 프로세스만(python 실행 + 설
     return False
 
 
-def make_fake(kick=False, modedrop=False, refzero=False, friction=False):  # 가짜 팔 — 위치 모드는 목표 유지, MIT는 τ=PD+ff로 단순 2차 동역학(중력 = 시작 유지 토크)
+def make_fake(kick=False, modedrop=False, refzero=False, friction=False, inertia=0.05):  # 가짜 팔 — 위치 모드는 목표 유지, MIT는 τ=PD+ff로 단순 2차 동역학(중력 = 시작 유지 토크)
     from types import SimpleNamespace as NS
 
     class Fake:
@@ -408,14 +409,14 @@ def make_fake(kick=False, modedrop=False, refzero=False, friction=False):  # 가
                 glitch = refzero and int(now * 2) % 3 == 0 and (now % 0.5) < 0.012  # 가끔 한 주기 동안 목표 위치를 0으로
                 for j, (qr, vr, kp, kd, tf) in s.cmd.items():
                     tau[j] = kp * ((0.0 if (glitch and j == 2) else qr) - s.q[j]) + kd * (vr - s.qd[j]) + tf
-                acc = (tau - s.g) / 0.05 - 2.0 * s.qd
+                acc = (tau - s.g) / inertia - 2.0 * s.qd
                 if friction:  # 정지마찰 0.25·운동마찰 0.15 N·m — 10-20 J1·J3 헌팅 흉내
                     net = tau - s.g
                     for j in range(6):
                         if abs(s.qd[j]) < 0.01 and abs(net[j]) < 0.25:
                             acc[j] = 0.0; s.qd[j] = 0.0
                         else:
-                            acc[j] -= np.sign(s.qd[j] if abs(s.qd[j]) >= 0.01 else net[j]) * 0.15 / 0.05
+                            acc[j] -= np.sign(s.qd[j] if abs(s.qd[j]) >= 0.01 else net[j]) * 0.15 / inertia
                 if kick and not s.kicked:
                     acc[2] -= 400.0; s.kicked = True  # 10-06 같은 진입 튐 흉내
                 s.qd = s.qd + acc * h; s.q = s.q + s.qd * h
@@ -578,6 +579,13 @@ def main():
     ap.add_argument("--vib-max", type=float, default=0.3, help="τ_vib 포화[N·m]")
     ap.add_argument("--vib-pred", type=float, default=8.0, help="조화 예측 주파수[Hz] — 표본 나이만큼 앞당김, 0이면 예측 안 함(처프 피크 8.0, 8절 10/26 밤 2)")
     ap.add_argument("--vib-k2", type=float, default=0.0, help="--vib-k-switch 뒤 k")
+    ap.add_argument("--vib-pred-mode", choices=["res", "old"], default="res", help="res: 공진기 뒤진 직교(Q, 1 Hz HP), old: 대역통과 + 앞선 직교(10-26 리밋 사이클)")
+    ap.add_argument("--vib-q", type=float, default=1.0, help="공진기 Q")
+    ap.add_argument("--vib-lead-deg", type=float, default=0.0, help="φ_lead[deg] — θ = ω₀a + φ_lead, 60 넘기지 말 것")
+    ap.add_argument("--vib-gate-hi", type=float, default=37.0, help="기울기 게이트 상한[deg]")
+    ap.add_argument("--vib-hf-max", type=float, default=0.02, help="감시: τ_vib 16 Hz 이상 rms(0.25 s) 상한[N·m]")
+    ap.add_argument("--fake-inertia", type=float, default=0.05, help="가짜 팔 관절 관성[kg·m²] — 실기 고주파 실효 관성은 TDE M̄ 0.01 수준")
+    ap.add_argument("--fake-enc-delay", type=int, default=0, help="가짜 팔: 엔코더(q, q̇) 보고를 N번 읽기 늦춤 — 자이로·엔코더 강체 몫 고주파 불일치")
     ap.add_argument("--vib-k-switch", type=float, default=0.0, help="MIT 진입 뒤 이 시각[s]에 k → --vib-k2, 처프는 전환 뒤 한 번 더(같은 처짐에서 짝 비교)")
     ap.add_argument("--vib-sum-max", type=float, default=0.3, help="처프 + τ_vib 합 포화[N·m]")
     ap.add_argument("--sine-joints", type=int, nargs="*", default=[], help="--stage sine을 여러 관절 같은 위상으로(a′: 2 3)")
@@ -590,6 +598,8 @@ def main():
     ap.add_argument("--fake-tap", type=float, default=5.0, help="가짜 IMU 모드에 툭(속도 충격)을 넣을 MIT 시각[s], 0이면 없음")
     ap.add_argument("--fake-delay", type=float, default=10.0, help="가짜 IMU 자이로 전달 지연[ms]")
     a = ap.parse_args()
+    if a.vib_lead_deg > 60:
+        raise SystemExit("φ_lead는 60° 이하(8절 10/26 밤 4)")
     if a.vib_joint and ((a.chirp_joint and a.chirp_joint != a.vib_joint) or a.vib_max > 0.5 or a.vib_sum_max > 0.5
                         or (a.vib_joint == a.joint and a.tdc and a.dist_mode != "torque")):
         raise SystemExit("τ_vib: 처프는 같은 관절만, 포화 0.5 N·m 이하, TDC 관절이면 --dist-mode torque(8절 10/26)")
@@ -600,7 +610,15 @@ def main():
     if a.chirp_joint and (a.chirp_amp > 0.25 or a.stage != "hold" or a.hold < a.chirp_start + a.chirp_dur):
         raise SystemExit("처프는 --stage hold, 진폭 0.25 N·m 이하, --hold ≥ chirp-start + chirp-dur")
     if a.fake:
-        p = make_fake(kick=a.fake_kick, modedrop=a.fake_modedrop, refzero=a.fake_refzero, friction=a.fake_friction)
+        p = make_fake(kick=a.fake_kick, modedrop=a.fake_modedrop, refzero=a.fake_refzero, friction=a.fake_friction, inertia=a.fake_inertia)
+        if a.fake_enc_delay:  # 엔코더 보고 지연(읽기 N번) — 실기의 자이로·엔코더 고주파 불일치 흉내
+            import collections
+            jm0, hs0d = p.GetArmJointMsgs, p.GetArmHighSpdInfoMsgs; qj = collections.deque(maxlen=a.fake_enc_delay + 1); qh = collections.deque(maxlen=a.fake_enc_delay + 1)
+            def jm_d():
+                qj.append(jm0()); return qj[0]
+            def hs_d():
+                qh.append(hs0d()); return qh[0]
+            p.GetArmJointMsgs = jm_d; p.GetArmHighSpdInfoMsgs = hs_d
         if a.fake_encspike:  # 1.5 s마다 한 번 읽기에서 J3 q̇만 +2.5 rad/s(팔·가짜 IMU는 그대로) — 엔코더만 튐 거부 시험
             hs0 = p.GetArmHighSpdInfoMsgs; p.spk_t = time.time()
             def hs_spiky():
