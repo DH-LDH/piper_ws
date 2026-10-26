@@ -2,7 +2,7 @@
 
 젯슨 커널에 HID 센서 허브가 없어 pip 휠(V4L)로는 IMU가 안 보임 → ~/librealsense_rsusb/py(RSUSB 소스 빌드)를 먼저 찾음.
 장치 타임스탬프(ms)를 그대로 보관하고, 빈틈(직전 표본과 간격 > 2.5배 중앙 주기)의 횟수·최대 길이를 센다.
-PC 수신 시각은 몰려 와서 중앙 23 ms·95% 46 ms 늦다(10-24) → 표본 시각 = 장치 시각 + 오프셋, 오프셋은 최근 창의 (수신 − 장치) 최솟값.
+PC 수신 시각은 몰려 와서 중앙 23 ms·95% 46 ms 늦다(10-24) → 표본 시각 = 장치 시각 + 오프셋, 오프셋은 도메인 전환 뒤 누적 (수신 − 장치)의 하위 1%.
 사용: s = ImuStream(); s.start(); a, g, age = s.latest(); ... s.stop(); s.gap_stats()
 """
 import collections
@@ -10,6 +10,8 @@ import os
 import sys
 import threading
 import time
+
+import numpy as np
 
 RSUSB = os.path.expanduser("~/librealsense_rsusb/py")
 if os.path.isdir(RSUSB) and RSUSB not in sys.path:
@@ -30,7 +32,7 @@ class ImuStream:
         self.gaps = {"a": [], "g": []}      # 빈틈 길이[ms]
         self.nominal = {}
         self.log = log                      # csv.writer면 모든 표본을 기록
-        self.offs = collections.deque(maxlen=400)  # (수신 − 장치) 최근 2 s(자이로 200 Hz) — 최솟값이 최소 지연 기준
+        self.offs = collections.deque(maxlen=60000)  # (수신 − 장치) 도메인 전환 뒤 누적(최대 약 3분) — 하위 1%가 최소 지연 기준
         self.off = None
         self.pipe = None
 
@@ -46,8 +48,8 @@ class ImuStream:
                 self.offs.clear(); self.off = None; self.n_domain = getattr(self, "n_domain", 0) + 1
             self.offs.append(oi)
             if self.n[k] % 20 == 0 or self.off is None:  # 창 중앙값에서 1 s 안의 최솟값 — 장치 시각 도메인이 바뀐 첫 표본 같은 튀는 값 제외
-                med = sorted(self.offs)[len(self.offs) // 2]
-                self.off = min(x for x in self.offs if abs(x - med) < 1.0)
+                arr = np.fromiter(self.offs, float); med = np.median(arr)  # 누적 하위 1%(오프라인 load_aligned와 같음) — 2 s 창 최솟값은 지연 바닥이 오르면 표본 시각을 10–24 ms 늦게 찍었음(10-26 E4 8절)
+                self.off = float(np.percentile(arr[np.abs(arr - med) < 1.0], 1))
             row = (dt / 1000.0 + self.off, dt, d.x, d.y, d.z)  # 표본 시각(PC 시계로 환산한 장치 시각)
             prev = self.last_dev[k]
             if prev is not None and 0 < dt - prev < 1000 and dt - prev > 2.5 * self.nominal[k]:
