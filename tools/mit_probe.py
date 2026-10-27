@@ -57,7 +57,7 @@ class Probe:
         if self.ext_kd is not None:
             self.kd = np.zeros(6)  # 펌웨어 감쇠 항도 끔 — 10-20 펌웨어 Kp 0에서도 J6 튐, 모터엔 우리 토크만
         os.makedirs(LOG_ROOT, exist_ok=True)
-        tag = time.strftime("%Y%m%d_%H%M%S") + f"_{a.stage}" + ("_fake" if a.fake else "") + ("" if a.go else "_dry")
+        tag = time.strftime("%Y%m%d_%H%M%S") + ("_plan" if a.plan else f"_{a.stage}") + ("_fake" if a.fake else "") + ("" if a.go else "_dry")
         self.path = os.path.join(LOG_ROOT, tag + ".csv")
         self.f = open(self.path, "w", newline="")
         self.w = csv.writer(self.f)
@@ -211,6 +211,11 @@ class Probe:
                       + f", 게이트 {a.vib_gate}–{a.vib_gate_hi}°, 클립 ±{a.vib_max} N·m, 감시 ①a 합 포화 ①b 클립 1 s 50% ② 20 Hz↑ rms > {a.vib_hf_max} 0.5 s"
                       + (", 데드밴드 반 칸" if a.vib_deadband else "") + (f", PPF {a.ppf_f} Hz ζ {a.ppf_zeta}" if a.vib_law == "ppf" else "")
                       + ", 경로 " + ("dist_comp(torque)" if a.vib_joint == a.joint and a.tdc else "τ_ff 직접"))
+            if a.plan:
+                from vib_plan import Plan, PlanCfg, parse
+                pl = Plan(a.plan, PlanCfg(chirp_amp=a.chirp_amp, sine_amp=a.amp, sine_hz=a.hz, psi_l_max=a.plan_psi_l), VibDampCfg(notch_f=a.vib_notch_f, notch_q=a.vib_notch_q))
+                print(f"[dry-run] 계획 {pl.total:.0f} s: " + " → ".join(f"{k}{'' if not kk else ' k ' + str(kk)} {d:g}{'주기' if k in ('sine', 'onoff') else ' s'}" for k, d, kk in parse(a.plan))
+                      + f" | a′ J{a.sine_joints} ±{a.amp}° {a.hz} Hz, 식별 처프 ±{a.chirp_amp} 4–12 Hz, 기울기 게이트 없음(기록만), 게이트 H ≥ 0.5·잔차 ≤ 35°·설명력 ≥ 0.7·절반 ψ ≤ 30°")
             if a.end_pos:
                 print("[dry-run] 정상 종료 시 비상 정지 대신 위치 모드로 전환(유지 자세 목표, 2 s 감시)")
             print("[dry-run] 명령은 하나도 보내지 않음. 실제 실행은 --go")
@@ -220,6 +225,12 @@ class Probe:
         t_start = time.time()
         hold_s = a.hold
         dur = hold_s + (a.cycles / a.hz + 2.0 if a.stage == "sine" else 0.0)
+        plan = None
+        if a.plan:  # (가) 한 시행 안 계획 — 길이·처프·a′·k를 계획이 정함(8절 10/27 오후 8–9)
+            from vib_plan import Plan, PlanCfg
+            plan = Plan(a.plan, PlanCfg(chirp_amp=a.chirp_amp, sine_amp=a.amp, sine_hz=a.hz, psi_l_max=a.plan_psi_l, lead_offset=a.plan_lead_offset),
+                        VibDampCfg(notch_f=a.vib_notch_f, notch_q=a.vib_notch_q, lead_deg=0.0))
+            dur = plan.total
         j6 = a.joint - 1
         reason = None
         t_prev = None
@@ -244,6 +255,9 @@ class Probe:
                                                          pred_f=a.vib_pred, age_max=a.vib_age_max / 1000.0, pred_mode=a.vib_pred_mode,
                                                          res_q=a.vib_q, lead_deg=a.vib_lead_deg, gate_hi=a.vib_gate_hi, hf_max=a.vib_hf_max,
                                                          notch_f=a.vib_notch_f, notch_q=a.vib_notch_q))
+        if plan is not None:
+            vd.c.gate_deg, vd.c.gate_hi = -90.0, 90.0  # 기울기 게이트 없음(기록만) — 식별 게이트가 대신
+            vd.vrec = plan.record_v
         sent = None; mm_t = np.zeros(6); t_last = None
         beeped = not a.beep
         while True:
@@ -258,12 +272,31 @@ class Probe:
                     qr[jj] = q_hold[jj] + A * math.sin(w * ts)
                     vr[jj] = A * w * math.cos(w * ts)
                 ar = -A * w * w * math.sin(w * ts) if (not a.sine_joints or a.joint in a.sine_joints) else 0.0
+            pi = None
+            if plan is not None:
+                pi = plan.at(tt)
+                plan.tripped = vd.tripped is not None
+                if pi["i"] != plan.cur:
+                    if plan.cur >= 0:
+                        plan.end_async(plan.cur)
+                    plan.begin(pi["i"]); print(f"[계획] 구간 {pi['i']} {pi['kind']} 시작 ({tt:.1f} s)", flush=True)
+                    pi = plan.at(tt)  # 판정 스레드가 도는 동안 k 0 — 경계에서 목표 k를 다시 계산
+                if pi["sine"] is not None:
+                    env, denv, wt = pi["sine"]; w = 2 * math.pi * a.hz; A = math.radians(a.amp)
+                    for jj in [j - 1 for j in a.sine_joints]:
+                        qr[jj] = q_hold[jj] + A * env * math.sin(wt); vr[jj] = A * (env * w * math.cos(wt) + denv * math.sin(wt))
+                    ar = -A * env * w * w * math.sin(wt) if a.joint in a.sine_joints else 0.0
+                if pi["kind"] == "onoff" and plan.lead is not None:
+                    vd.c.lead_deg = plan.lead
+                if pi["kind"] == "ck" and plan.lead is not None:
+                    vd.c.lead_deg = plan.lead
+                vd.c.k = plan.step_k(pi["k"], now)
             if vd is not None and a.vib_k_switch and not k_switched and tt >= a.vib_k_switch:  # 한 MIT 시행 안 k 짝(같은 처짐)
                 vd.c.k = a.vib_k2; k_switched = True
                 print(f"k 전환 {a.vib_k} → {a.vib_k2} ({tt:.1f} s)", flush=True)
             if not beeped and tt >= a.beep:
                 print("\a▶ 지금 툭", flush=True); beeped = True
-            chirp_now["v"] = chirp(a, tt) if a.chirp_joint else 0.0
+            chirp_now["v"] = pi["chirp"] if pi is not None else chirp(a, tt) if a.chirp_joint else 0.0
             s = read_state(p)  # 읽기 → 계산 → 송신 (우리 P가 최신 위치를 쓰도록)
             tau = tff.copy()
             vo = None; sum_sat = False
@@ -303,6 +336,8 @@ class Probe:
                 ctrl.commit(tau[j6])  # 포화 후 값 — 실제 보낸 토크로 다음 TDE
             for j in range(6):
                 p.JointMitCtrl(j + 1, float(qr[j]), float(vr[j]), float(self.kp[j]), float(self.kd[j]), float(tau[j]) + TAU_STEP / 2)
+            if plan is not None and vo is not None:
+                plan.record(pi["ts"], time.time(), float(tau[j6]), self.vib_now["v"], vo["age"], (time.time() - vo["t_g"]) if vo["t_g"] else 0.0)
             if vo is not None and vo["t_g"] is not None:  # Td = 이 주기 JointMitCtrl 송신 완료 − 마지막 자이로 표본 시각(장치 시각 + 최소 오프셋 → 하한)
                 td = (time.time() - vo["t_g"]) * 1000; tds.append(td)
                 self.vw.writerow([f"{now - self.t0:.4f}", f"{vo['t_g'] - self.t0:.4f}", f"{td:.2f}", f"{vo['age'] * 1000:.2f}", vo["n_new"],
@@ -333,6 +368,15 @@ class Probe:
             if reason:
                 break
             time.sleep(max(0.0, dt - (time.time() - now)))
+        if plan is not None:
+            if plan.busy is not None:
+                plan.busy.join()
+            if plan.cur >= 0 and plan.buf:
+                plan.end(plan.cur)
+            import json
+            with open(self.path.replace(".csv", ".plan.json"), "w") as fj:
+                json.dump(dict(plan=a.plan, lead=plan.lead, k_cap=plan.k_cap, k_ok=plan.k_ok, results=plan.results), fj, ensure_ascii=False, indent=1)
+            print(f"[계획] 요약: φ_lead {plan.lead}, k_ok {plan.k_ok} → {self.path.replace('.csv', '.plan.json')}", flush=True)
         self.spikes = self.spike_n  # 순간 튐: 1주기라도 속도 한계 초과
         print(f"루프 멈춤 30 ms 초과 {getattr(self, 'n_gap30', 0)}회 (최대 {getattr(self, 'gap_max', 0.0) * 1000:.0f} ms) — 수십 회면 원인 확인(8절 10/26 밤 7)")
         if tds:
@@ -600,6 +644,9 @@ def main():
     ap.add_argument("--vib-q", type=float, default=1.0, help="공진기 Q")
     ap.add_argument("--vib-lead-deg", type=float, default=0.0, help="φ_lead[deg] — θ = ω₀a + φ_lead, 60 넘기지 말 것")
     ap.add_argument("--vib-gate-hi", type=float, default=37.0, help="기울기 게이트 상한[deg]")
+    ap.add_argument("--plan", default="", help="(가) 한 시행 계획, 예: sine:2,id:18,ck:0.2:18,ck:0.5:18,onoff:6,id:18 — 처프·a′·k를 계획이 정함")
+    ap.add_argument("--plan-psi-l", type=float, default=30.0, help="계획 ck 구간 ψ_L 통과 한도[deg]")
+    ap.add_argument("--plan-lead-offset", type=float, default=0.0, help="φ_lead 계통 몫[deg] — 실기·가짜 팔 모두 0(E4 14절, 가짜 팔 ψ_L +9° 확인)")
     ap.add_argument("--vib-notch-f", type=float, default=0.0, help="τ_vib 입력 노치 중심[Hz], 0이면 끔(8절 10/27 오전 3: 29.6)")
     ap.add_argument("--vib-notch-q", type=float, default=1.5, help="노치 Q(1.5면 8 Hz −11°)")
     ap.add_argument("--vib-hf-max", type=float, default=0.02, help="감시: τ_vib 16 Hz 이상 rms(0.25 s) 상한[N·m]")
@@ -617,6 +664,10 @@ def main():
     ap.add_argument("--fake-tap", type=float, default=5.0, help="가짜 IMU 모드에 툭(속도 충격)을 넣을 MIT 시각[s], 0이면 없음")
     ap.add_argument("--fake-delay", type=float, default=10.0, help="가짜 IMU 자이로 전달 지연[ms]")
     a = ap.parse_args()
+    if a.plan:
+        if not a.vib_joint or a.vib_joint != a.joint or not a.tdc or a.stage != "hold" or a.vib_k_switch or not a.speed_err or not a.sine_joints:
+            raise SystemExit("--plan: --tdc --hybrid --joint J --vib-joint J --stage hold --speed-err --sine-joints … 필요, --vib-k-switch 금지")
+        a.chirp_joint = a.vib_joint; a.vib_k = 0.0; a.chirp_start = 0.0; a.chirp_dur = 0.0; a.hold = 0.0  # 처프·k는 계획이
     if abs(a.vib_lead_deg) > 180:
         raise SystemExit("φ_lead는 ±180° 안(8절 10/27 오전 4: 상한 없음, 1–5 Hz |L| 확인 조건)")
     if a.vib_joint and ((a.chirp_joint and a.chirp_joint != a.vib_joint) or a.vib_max > 0.5 or a.vib_sum_max > 0.5

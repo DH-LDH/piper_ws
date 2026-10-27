@@ -85,6 +85,7 @@ class VibDamp:
         self.hp4 = [[0.0, 0.0], [0.0, 0.0]]; self.hp4_u = 0.0  # 감시 ②: 4차 Butterworth 20 Hz 고역(2차 두 단), 8 Hz 통과 0.026
         self.hf = collections.deque(maxlen=cfg.hf_win); self.hf_since = None; self.thp = 0.0; self.t_prev_tau = 0.0; self.t_last = None  # 감시 ②: τ_vib 16 Hz 고역 rms(0.25 s) > hf_max — 성장 단계에서 끔
         self.n_samples = self.n_reject = self.n_stale = self.n_cycles = self.n_badtime = 0
+        self.vrec = None  # (t_g, v) 표본마다 부를 함수 — (가) 계획의 실시간 식별용
 
     def _add_encoder(self, t, q, qd):  # 한 주기 점프 > 문턱인 관절을 튐 후보로 — 판정은 자이로 표본 처리 때
         qd = np.asarray(qd, float)
@@ -154,6 +155,8 @@ class VibDamp:
                 ey = ey_h; self.n_reject += 1
         h = (t_g - self.t_g) if self.t_g is not None else 0.0
         self.t_g = t_g; self.wy, self.ey = wy, ey; self.v = wy - ey
+        if self.vrec is not None:
+            self.vrec(t_g, self.v)
         if 0 < h < 0.2:
             if self.c.pred_mode == "res":
                 self._resonator(self._notch(self.v, h) if self.c.notch_f else self.v, h)
