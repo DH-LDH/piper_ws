@@ -35,7 +35,8 @@ def segment(f, d, v, t1, t2, J, kin, tb, fmax=11.0, fmin=5.0):
         QD[:, j], ts = F.despike(tu, QD[:, j]); sp += list(ts)
     ey = np.array([jacobians(kin, q, tb.R_l6)[0][1] @ qd for q, qd in zip(Q, QD)])
     c = np.interp(tu, m.t.values, m.chirp.values)
-    tau = np.interp(tu, m.t.values, m[f"tff{J}"].values); tv = np.interp(tu, v.t.values, v.tau_vib.values)
+    tau = np.interp(tu, m.t.values, m[f"tff{J}"].values)
+    tv = np.interp(tu, m.t.values, m.tau_vib.values) if "tau_vib" in m else np.interp(tu, v.t.values, v.tau_vib.values)  # 본 CSV(송신 뒤 시각)로 τ_sent와 같은 기준 — vib.csv는 주기 시작 시각이라 Td − a(약 6 ms, 8 Hz +17°) 앞섬
     lo = min(1.5, fmin / 2)  # 저주파 처프(1–6 Hz)면 대역 아래 끝을 내림
     ys = {"v": E.band(G[:, 1] - ey, lo, 45), "tv": E.band(tv, lo, 45), "ct": E.band(c + tv, lo, 45)}
     rows = F.lockin(tu, c, E.band(tau, lo, 45), ys, np.array(sp), fmin=fmin, fmax=fmax)
