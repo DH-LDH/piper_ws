@@ -85,9 +85,11 @@ def main():
                 print(f"\n{os.path.basename(f)[:15]} | J{J} | k {k:.2f} | 기울기 {tl:.2f}° | 튐 {nsp}표본 | 저주파 (나이 중앙 {age * 1000:.0f} ms, φ_lead {a.lead:.0f}°, 노치 {a.notch_f})")
                 print("      |H|: " + " ".join(f"{fb:.2f}:{h:.3f}" for fb, h in lf.H.items()))
                 print("      τ 비: " + " ".join(f"{fb:.2f}:{r:.2f}" for fb, r in lf.tr.items()) + f" | 중앙 {lf.tr.median():.2f}")
+                low_tr = lf.tr[lf.index <= 3].median() < 0.8  # 1–3 Hz τ 비 < 0.8이면 실효값도(8절 10/27 오전 9 — 판정은 보수값)
                 for kk in (0.2, 0.5, 1.0):
-                    L = kk * lf.H.values * pg; m5 = lf.index.values <= 5
-                    print(f"      k {kk}: 1–5 Hz |L| 최대 {L[m5].max():.3f} ({lf.index.values[m5][L[m5].argmax()]:.2f} Hz)")
+                    L = kk * lf.H.values * pg; m5 = lf.index.values <= 5; Le = L * lf.tr.values
+                    print(f"      k {kk}: 1–5 Hz |L| 최대 {L[m5].max():.3f} ({lf.index.values[m5][L[m5].argmax()]:.2f} Hz, 보수값 τ 비 1)"
+                          + (f" | 실효값(× τ 비) {Le[m5].max():.3f}" if low_tr else ""))
                 L1 = (lf.H.values * pg)[lf.index.values <= 5].max()
                 print(f"      ⇒ k 1.0 판정: " + ("허용(< 0.3)" if L1 < 0.3 else "상한 k 0.7(0.3–0.5)" if L1 < 0.5 else "> 0.5 — 고역통과 강화 검토"))
             b = g[(g.index >= BAND[0]) & (g.index <= BAND[1])]
