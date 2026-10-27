@@ -118,10 +118,9 @@ class VibDamp:
         k3 = f(r + h / 2 * k2[0], rd + h / 2 * k2[1], um); k4 = f(r + h * k3[0], rd + h * k3[1], u1)
         self.r = r + h / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]); self.rd = rd + h / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
 
-    def _sample(self, t_g, g_raw):
+    def _sample(self, t_g, g_raw, Jw, R):  # Jw·R은 주기당 1회 계산값 재사용(표본마다 0.5 ms × 몰림 최대 40개 → 루프 멈춤, 8절 10/26 밤 7)
         q, raw, held, cand = self._qd_at(t_g)
-        Jw, _ = jacobians(self.kin, q, self.tb.R_l6)
-        wy = float((self.tb.rot(q) @ np.asarray(g_raw))[1])
+        wy = float((R @ np.asarray(g_raw))[1])
         ey = float(Jw[1] @ raw)
         if cand:  # 엔코더만 튐: 직전값이 자이로를 더 잘 설명하면 거부
             ey_h = float(Jw[1] @ held)
@@ -155,10 +154,12 @@ class VibDamp:
     def step(self, t_mit, now, q, qd, gyro_samples, accel_raw):
         c = self.c
         self._add_encoder(now, q, qd); self.n_cycles += 1
+        if gyro_samples:
+            qn = np.asarray(q, float); Jw, _ = jacobians(self.kin, qn, self.tb.R_l6); R = self.tb.rot(qn)
         for t_g, g in gyro_samples:
             if t_g > now + 0.05 or (self.t_g is not None and t_g <= self.t_g):  # 미래·역행 시각(도메인 전환 잔재) 표본은 버림
                 self.n_badtime += 1; continue
-            self._sample(t_g, g)
+            self._sample(t_g, g, Jw, R)
         if self.tilt is None:  # 게이트 창: 원시 가속도 모아 기울기 → 문턱 판정, 그 전엔 τ_vib = 0
             if c.gate_win[0] <= t_mit <= c.gate_win[1] and accel_raw is not None:
                 self.acc.append(np.asarray(accel_raw, float))
