@@ -32,8 +32,8 @@ class ImuStream:
         self.gaps = {"a": [], "g": []}      # 빈틈 길이[ms]
         self.nominal = {}
         self.log = log                      # csv.writer면 모든 표본을 기록
-        self.offs = collections.deque(maxlen=60000)  # (수신 − 장치) 도메인 전환 뒤 누적(최대 약 3분) — 하위 1%가 최소 지연 기준
-        self.off = None
+        self.offs = np.empty(60000); self.offs_n = 0  # (수신 − 장치) 도메인 전환 뒤 누적 고리(최대 약 3분) — 하위 1%가 최소 지연 기준
+        self.off = None; self.t_off = 0.0; self.dom = 0
         self.pipe = None
 
     def _cb(self, f):
@@ -42,14 +42,16 @@ class ImuStream:
             return
         k = "a" if m.get_profile().stream_type() == rs.stream.accel else "g"
         d = m.get_motion_data(); ht = time.time(); dt = m.get_timestamp()
+        snap = None
         with self.lock:
             oi = ht - dt / 1000.0
             if self.off is not None and abs(oi - self.off) > 1.0:  # 장치 시각 도메인 전환(10-26 낙하 뒤: 하드웨어 → epoch ms) — 새 도메인으로 오프셋 다시
-                self.offs.clear(); self.off = None; self.n_domain = getattr(self, "n_domain", 0) + 1
-            self.offs.append(oi)
-            if self.n[k] % 20 == 0 or self.off is None:  # 창 중앙값에서 1 s 안의 최솟값 — 장치 시각 도메인이 바뀐 첫 표본 같은 튀는 값 제외
-                arr = np.fromiter(self.offs, float); med = np.median(arr)  # 누적 하위 1%(오프라인 load_aligned와 같음) — 2 s 창 최솟값은 지연 바닥이 오르면 표본 시각을 10–24 ms 늦게 찍었음(10-26 E4 8절)
-                self.off = float(np.percentile(arr[np.abs(arr - med) < 1.0], 1))
+                self.offs_n = 0; self.off = None; self.dom += 1; self.n_domain = getattr(self, "n_domain", 0) + 1
+            self.offs[self.offs_n % len(self.offs)] = oi; self.offs_n += 1
+            if self.off is None:
+                self.off = oi
+            if ht - self.t_off > 1.0 or self.offs_n < 50:  # 1 s마다(처음 50개는 매번) 복사만 하고 계산은 락 밖 — 10-27 125 s 시행에서 표본마다 전체 중앙값·백분위가 락을 잡아 루프 멈춤이 시간에 따라 늘었음
+                snap = (self.offs[:min(self.offs_n, len(self.offs))].copy(), self.dom); self.t_off = ht
             row = (dt / 1000.0 + self.off, dt, d.x, d.y, d.z)  # 표본 시각(PC 시계로 환산한 장치 시각)
             prev = self.last_dev[k]
             if prev is not None and 0 < dt - prev < 1000 and dt - prev > 2.5 * self.nominal[k]:
@@ -62,6 +64,12 @@ class ImuStream:
                 self.g = row
             if self.log is not None:
                 self.log.writerow((f"{ht:.6f}", f"{dt:.3f}", k, f"{d.x:.5f}", f"{d.y:.5f}", f"{d.z:.5f}"))  # 원본은 수신 시각 그대로
+        if snap is not None:  # 누적 하위 1%(오프라인 load_aligned와 같음), 창 중앙값 ±1 s 밖(도메인 전환 첫 표본 등) 제외 — O(n) partition
+            arr, dom = snap; med = np.partition(arr, len(arr) // 2)[len(arr) // 2]; sel = arr[np.abs(arr - med) < 1.0]
+            off = float(np.partition(sel, int(0.01 * (len(sel) - 1)))[int(0.01 * (len(sel) - 1))])
+            with self.lock:
+                if dom == self.dom:
+                    self.off = off
 
     def start(self):
         if not rs.context().devices:

@@ -18,6 +18,7 @@ from link_est import jacobians
 
 TAU_STEP = 16.0 / 255  # MIT 토크 한 칸[N·m]
 SPIKE_JUMP = 0.5       # 엔코더 한 주기 속도 점프 문턱[rad/s]
+SPIKE_MAX_N = 4        # 후보가 이만큼 넘게 이어지면 튐이 아니라 정상값 이동으로 봄(실제 튐은 1–3주기)
 
 
 @dataclass
@@ -90,6 +91,8 @@ class VibDamp:
     def _add_encoder(self, t, q, qd):  # 한 주기 점프 > 문턱인 관절을 튐 후보로 — 판정은 자이로 표본 처리 때
         qd = np.asarray(qd, float)
         cand = np.zeros(6, bool) if self.qd_good is None else np.abs(qd - self.qd_good) > SPIKE_JUMP
+        self.cand_n = np.where(cand, getattr(self, "cand_n", np.zeros(6, int)) + 1, 0)
+        cand &= self.cand_n <= SPIKE_MAX_N  # 후보가 이어지면 지금 값을 정상으로 — 튐 꼬리 값(10-27 J5 0.56)이 정상값으로 잡혀 영영 후보로 끼던 것 방지
         self.enc.append((t, np.asarray(q, float), qd, cand))
         self.qd_good = np.where(cand, self.qd_good if self.qd_good is not None else qd, qd)
 

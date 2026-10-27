@@ -257,6 +257,7 @@ class Probe:
                                                          notch_f=a.vib_notch_f, notch_q=a.vib_notch_q))
         if plan is not None:
             vd.c.gate_deg, vd.c.gate_hi = -90.0, 90.0  # 기울기 게이트 없음(기록만) — 식별 게이트가 대신
+            s0 = plan_hold0(a.plan); vd.c.gate_win = (s0 + 0.3, s0 + 1.8)  # 기울기 기록은 첫 유지 구간(a′ 도중이면 자세가 달라 무의미)
             vd.vrec = plan.record_v
         sent = None; mm_t = np.zeros(6); t_last = None
         beeped = not a.beep
@@ -559,7 +560,17 @@ class FakeImu:  # 가짜 팔용 IMU — 8 Hz 피치 모드(J2 τ로 구동, 툭 
         return g[-40:], (s.hist[-1][2] if s.hist else None)
 
 
-def print_tilt(path):  # 링크 처짐 상태(VIB_E3·8절 10/26): MIT 시작·끝 1.5 s의 IMU 정지 기울기 — 엔코더가 같아도 회마다 2–4° 다름
+def plan_hold0(plan):  # 계획의 첫 유지(sine 아닌) 구간 시작[s] — 기울기는 같은 유지 자세에서만 잼(E4 16절)
+    from vib_plan import parse
+    t = 0.0
+    for k, d, _ in parse(plan):
+        if k not in ("sine", "onoff"):
+            return t
+        t += d / 0.25
+    return 0.0
+
+
+def print_tilt(path, s0=0.0):  # 링크 처짐 상태(VIB_E3·8절 10/26): MIT 시작(계획이면 첫 유지 구간)·끝 1.5 s의 IMU 정지 기울기 — 엔코더가 같아도 회마다 2–4° 다름
     try:
         from imu_frame import static_tilt
         with open(path) as f:
@@ -569,7 +580,7 @@ def print_tilt(path):  # 링크 처짐 상태(VIB_E3·8절 10/26): MIT 시작·�
         if ts:
             out.append(f"정지 확인 {static_tilt(path, ts[0], ts[-1]):.2f}°")
         if tm:
-            out.append(f"MIT 시작 {static_tilt(path, tm[0] + 0.3, tm[0] + 1.8):.2f}°")
+            out.append(f"MIT {'첫 식별' if s0 else '시작'} {static_tilt(path, tm[0] + s0 + 0.3, tm[0] + s0 + 1.8):.2f}°")
             out.append(f"MIT 끝 {static_tilt(path, tm[-1] - 1.5, tm[-1]):.2f}°")
         print("링크 정지 기울기(IMU atan2(y,−z), 33° 이상이 E3 '켜진' 쪽): " + " | ".join(out))
     except Exception as e:  # 기울기는 참고값 — 실패해도 실험 결과에는 영향 없음
@@ -737,7 +748,7 @@ def main():
     if getattr(pr, "td_stats", None):
         print(pr.td_stats)
     if pr.imu or pr.stream is not None:
-        print_tilt(pr.path)
+        print_tilt(pr.path, plan_hold0(a.plan) if a.plan else 0.0)
     if a.go and not a.fake:
         if "위치 모드 전환 |" in res:
             print("팔은 대기 모드(Enable 유지)로 유지 자세에 서 있습니다 — 내려앉지 않음. 다음 시행 전 clear_arm_fault → traj_test 필요.")

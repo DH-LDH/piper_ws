@@ -63,7 +63,8 @@ def report(p):
     elif oi:
         print("  on/off: k_ok 0 → 짝 없음(기준선 a′)")
     f = p
-    print(f"  기울기: MIT 시작 {static_tilt(f, tm0 + 0.3, tm0 + 1.8):.2f}° | 첫 식별 직전 {static_tilt(f, tm0 + t0s[1] - 1.5, tm0 + t0s[1]) if len(t0s) > 1 else float('nan'):.2f}° | 끝 {static_tilt(f, m.t.values[-1] - 1.5, m.t.values[-1]):.2f}°(모두 유지 자세)")
+    h0 = next((t0s[k] for k, (kk, _, _) in enumerate(segs) if kk not in ("sine", "onoff")), 0.0)  # 첫 유지 구간 — a′ 도중은 자세가 달라 비교 안 함(E4 16절)
+    print(f"  기울기(유지 자세): 첫 식별 {static_tilt(f, tm0 + h0 + 0.3, tm0 + h0 + 1.8):.2f}° | 끝 {static_tilt(f, m.t.values[-1] - 1.5, m.t.values[-1]):.2f}°")
 
 
 if __name__ == "__main__":
