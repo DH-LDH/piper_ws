@@ -598,3 +598,11 @@ k = 0.2 짝 1회(AB): 복구 → 기울기 ≥ 35° → `python3 tools/mit_probe
 ## 다음 (10/28 실기)
 - 복구(아무 기울기) → dry-run → `mit_probe --stage hold --tdc --hybrid --joint 2 --mbar 0.01 --dist-mode torque --vib-joint 2 --vib-max 0.15 --vib-notch-f 29.6 --speed-err --sine-joints 2 3 --dev-limit 6 --speed-consec 10 --plan "sine:2,id:18,ck:0.2:18,ck:0.5:18,onoff:6,id:18" --go`(약 104 s)
 - 결과로 plan.json + `vib_chirp_cl`(k 구간)·D3 지표(on/off 짝 IMU 5–10 Hz rms) 확인.
+
+### 15-1. (가) 보강 (8절 10/27 오후 10)
+- 확인: 14-1 표의 ∠L·ψ_L은 14절 시각 수정(24654fa) 뒤에 계산한 값이다. 15절 기록 재생도 본 CSV `tau_vib`를 썼다.
+- 판정을 판단 28 방식으로 확정: ck 통과 = |ψ_L| ≤ 30°만(플랜트 Δψ는 기록).
+- ① ck마다 φ_lead ← φ_lead − clip(ψ_L, ±60°), 허용 k도 새 φ_lead로 다시 계산. on/off는 **통과한 ck의 φ_lead(lead_ok)**로 한다 — 불통과 ck 뒤 보정값은 검증 안 된 값이라 쓰지 않음(가짜 팔에서 처음엔 불통과 보정 324°로 on/off가 돌던 것을 잡음).
+- ② k ≥ 1.0 ck는 직전 ck ψ_L 통과 뒤에만. k < 1.0 ck는 직전 ck가 불통과여도 보정된 φ_lead로 진행(해석 — 0.2 불통과 뒤 0.5에서 보정값을 시험할 수 있게, 최악 증폭 1.17). on/off k = 통과한 최대 k.
+- ③ ck 출력에 공진 |L|·|1+L|(맞춤 c_L, 공진에서 G = 1), 충격 창 밖 클립 비율 추가 — k 1.5 허용 조건(|1+L| 1.1–1.2, 클립 ≤ 5%) 판단용. plan.json에 lead_used·lead_next·lead_ok 기록.
+- 가짜 팔(`id:18,ck:0.05:12,ck:0.1:12,onoff:4,id:12`): k 0.05 ψ_L +2° 통과(|1+L| 1.17) → φ_lead 32 → 30° / k 0.1 ψ_L +113° 불통과(가짜 팔 H 2.1이라 k 0.1에서 |L| 0.5, 플랜트 ψ +95°로 바뀜) → on/off는 k 0.05·φ_lead 32°로 교대.

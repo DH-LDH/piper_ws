@@ -228,7 +228,7 @@ class Probe:
         plan = None
         if a.plan:  # (가) 한 시행 안 계획 — 길이·처프·a′·k를 계획이 정함(8절 10/27 오후 8–9)
             from vib_plan import Plan, PlanCfg
-            plan = Plan(a.plan, PlanCfg(chirp_amp=a.chirp_amp, sine_amp=a.amp, sine_hz=a.hz, psi_l_max=a.plan_psi_l, lead_offset=a.plan_lead_offset),
+            plan = Plan(a.plan, PlanCfg(chirp_amp=a.chirp_amp, sine_amp=a.amp, sine_hz=a.hz, psi_l_max=a.plan_psi_l, lead_offset=a.plan_lead_offset, clip=a.vib_max),
                         VibDampCfg(notch_f=a.vib_notch_f, notch_q=a.vib_notch_q, lead_deg=0.0))
             dur = plan.total
         j6 = a.joint - 1
@@ -286,8 +286,8 @@ class Probe:
                     for jj in [j - 1 for j in a.sine_joints]:
                         qr[jj] = q_hold[jj] + A * env * math.sin(wt); vr[jj] = A * (env * w * math.cos(wt) + denv * math.sin(wt))
                     ar = -A * env * w * w * math.sin(wt) if a.joint in a.sine_joints else 0.0
-                if pi["kind"] == "onoff" and plan.lead is not None:
-                    vd.c.lead_deg = plan.lead
+                if pi["kind"] == "onoff" and plan.lead_ok is not None:
+                    vd.c.lead_deg = plan.lead_ok
                 if pi["kind"] == "ck" and plan.lead is not None:
                     vd.c.lead_deg = plan.lead
                 vd.c.k = plan.step_k(pi["k"], now)
@@ -375,8 +375,8 @@ class Probe:
                 plan.end(plan.cur)
             import json
             with open(self.path.replace(".csv", ".plan.json"), "w") as fj:
-                json.dump(dict(plan=a.plan, lead=plan.lead, k_cap=plan.k_cap, k_ok=plan.k_ok, results=plan.results), fj, ensure_ascii=False, indent=1)
-            print(f"[계획] 요약: φ_lead {plan.lead}, k_ok {plan.k_ok} → {self.path.replace('.csv', '.plan.json')}", flush=True)
+                json.dump(dict(plan=a.plan, lead=plan.lead, lead_ok=plan.lead_ok, k_cap=plan.k_cap, k_ok=plan.k_ok, results=plan.results), fj, ensure_ascii=False, indent=1)
+            print(f"[계획] 요약: k_ok {plan.k_ok}(φ_lead {plan.lead_ok if plan.lead_ok is None else round(plan.lead_ok)}°로 on/off) → {self.path.replace('.csv', '.plan.json')}", flush=True)
         self.spikes = self.spike_n  # 순간 튐: 1주기라도 속도 한계 초과
         print(f"루프 멈춤 30 ms 초과 {getattr(self, 'n_gap30', 0)}회 (최대 {getattr(self, 'gap_max', 0.0) * 1000:.0f} ms) — 수십 회면 원인 확인(8절 10/26 밤 7)")
         if tds:

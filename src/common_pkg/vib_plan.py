@@ -38,6 +38,8 @@ class PlanCfg:
     drift_max: float = 30.0    # ck 구간 ψ가 식별값과 다를 수 있는 한도[deg]
     l_max: float = 0.3         # 고주파·저주파 |L| 상한(허용 k 계산)
     lead_offset: float = 0.0   # φ_lead 계통 몫[deg] — E4 14절: 0
+    lead_step: float = 60.0    # ck마다 φ_lead ← φ_lead − ψ_L, 한 번에 이만큼까지(8절 오후 10 ①)
+    clip: float = 0.15         # τ_vib 클립(클립 비율 계산용)
 
 
 def parse(s):
@@ -74,9 +76,13 @@ def fit_mode(f, H):  # |H| 가중 최소제곱 H ≈ c·G — (f₀, ζ, c, 위�
     return f0, z, cc, float(np.sqrt(np.sum(ww * pr ** 2) / np.sum(ww))), float(1 - r[i])
 
 
-def psi_with(f, Y, f0, z):  # 정해진 모양으로 Y ≈ c·G의 ∠c[deg]
+def c_with(f, Y, f0, z):  # 정해진 모양으로 Y ≈ c·G의 복소 c(공진에서 Y ≈ c)
     g = mode_shape(f, f0, z); w = np.abs(Y)
-    return float(np.degrees(np.angle(np.sum(w * Y * np.conj(g)) / np.sum(w * np.abs(g) ** 2))))
+    return np.sum(w * Y * np.conj(g)) / np.sum(w * np.abs(g) ** 2)
+
+
+def psi_with(f, Y, f0, z):  # ∠c[deg]
+    return float(np.degrees(np.angle(c_with(f, Y, f0, z))))
 
 
 def wrap(x):
@@ -108,6 +114,7 @@ class Plan:
         self.total = t; self.cur = -1; self.k_now = 0.0; self.k_tgt = 0.0; self.t_last = None
         self.lead = None; self.k_ok = 0.0; self.k_cap = 0.0; self.ident = None; self.results = []
         self.buf = None; self.vbuf = None; self.ck_prev = None  # 직전 ck 통과 여부(None = 아직 ck 없음)
+        self.lead_ok = None  # k_ok가 통과한 구간의 φ_lead — onoff는 이것으로
         self.busy = None; self.tripped = False  # 구간 끝 판정 스레드(도는 동안 k 0), 감시 발동 여부(mit_probe가 넣음)
 
     def at(self, tt):  # (구간 번호, 종류, 구간 안 시각, 사인 env·위상, 처프 값, 처프 위상, 목표 k)
@@ -128,8 +135,8 @@ class Plan:
                 out["k"] = kk if self.ck_allowed(kk) else 0.0
         return out
 
-    def ck_allowed(self, kk):  # 게이트 통과·허용 k 안·직전 ck 통과(첫 ck는 예외)일 때만 k 켬
-        return (self.lead is not None and 0 < kk <= self.k_cap + 1e-9 and self.ck_prev is not False and not self.tripped
+    def ck_allowed(self, kk):  # 게이트 통과·허용 k 안·감시 미발동, k ≥ 1.0은 직전 ck(0.5) ψ_L 통과 뒤에만(8절 오후 10 ②)
+        return (self.lead is not None and 0 < kk <= self.k_cap + 1e-9 and not self.tripped and (kk < 1.0 - 1e-9 or self.ck_prev is True)
                 and (self.busy is None or not self.busy.is_alive()))
 
     def step_k(self, target, now):  # 목표 k로 선형 램프(k_ramp 동안 큰 쪽 크기만큼)
@@ -176,6 +183,7 @@ class Plan:
                 out.append((V / Tq, -Tv / Tq))
             rows.append(out)
         ok = [i for i, r in enumerate(rows) if r is not None]
+        self.clip_frac = float(np.mean(np.abs(tvu[keep]) >= 0.9 * self.c.clip)) if keep.any() else 0.0  # 충격 창 밖 클립 비율
         if len(ok) < 5:
             self.why = f"bin {len(ok)}개(τ 시각 {tq[0]:.2f}–{tq[-1]:.2f}, v 시각 {tg[0]:.2f}–{tg[-1]:.2f}, 충격 제외 {100 * (1 - keep.mean()):.0f}%)"; return None
         f = BINS[ok]; R = [rows[i] for i in ok]
@@ -222,14 +230,22 @@ class Plan:
                 + (f" → 게이트 {'통과' if gate else '불통과'}" + (f", φ_lead {self.lead:.0f}°, 허용 k ≤ {self.k_cap:.2f}(k 1.0 |L| 고주파 {rec['L_hf_k1']} 저주파 {rec['L_lf_k1']})" if 'lead' in rec else "")
                    if "dpsi" not in rec else f" | 재식별 Δψ {rec['dpsi']:+.0f}°" + (" ★ ±30° 넘음 — on/off 짝 주 판정 제외" if abs(rec['dpsi']) > 30 else "")), flush=True)
         else:
-            on = self.lead is not None and 0 < kk <= self.k_cap + 1e-9 and self.ck_prev is not False and not self.tripped
-            psi_l = psi_with(f, L, f0, z) if on else None; drift = wrap(psi - self.ident["psi"]) if self.ident else None
-            passed = bool(on and abs(psi_l) <= self.c.psi_l_max and drift is not None and abs(drift) <= self.c.drift_max)
-            if passed:
-                self.k_ok = kk
+            on = self.lead is not None and 0 < kk <= self.k_cap + 1e-9 and not self.tripped and (kk < 1.0 - 1e-9 or self.ck_prev is True)
+            cL = c_with(f, L, f0, z) if on else None; psi_l = float(np.degrees(np.angle(cL))) if on else None
+            drift = wrap(psi - self.ident["psi"]) if self.ident else None
+            passed = bool(on and abs(psi_l) <= self.c.psi_l_max)  # 판정은 ψ_L만(판단 28), Δψ는 기록
+            lead0 = self.lead
+            if passed and kk >= self.k_ok:
+                self.k_ok = kk; self.lead_ok = lead0
             if on:
                 self.ck_prev = passed
-            rec.update(on=on, psi_L=None if psi_l is None else round(psi_l, 1), L_mag=round(float(np.median(np.abs(L))), 3), drift=None if drift is None else round(drift, 1), passed=passed)
-            log(f"[계획] k {kk} 처프 구간 {i}: " + (("k 꺼짐(감시 발동)" if self.tripped else "k 안 켬(게이트 불통과·허용 k 초과·직전 ck 불통과)") if not on else
-                f"ψ_L {psi_l:+.0f}° |L| 중앙 {rec['L_mag']:.3f}, 플랜트 ψ {psi:+.0f}°(식별 대비 {drift:+.0f}°) → {'통과, k_ok = ' + str(kk) if passed else '불통과, k_ok ' + str(self.k_ok) + ' 유지'}"), flush=True)
+                self.lead = (self.lead - float(np.clip(psi_l, -self.c.lead_step, self.c.lead_step))) % 360  # 다음 구간 위상 보정(오후 10 ①)
+                self.k_cap, _, _ = k_allowed(self.lead, age, self.vc, self.c.l_max)
+            rec.update(on=on, psi_L=None if psi_l is None else round(psi_l, 1), L_peak=None if cL is None else round(float(abs(cL)), 3),
+                       one_plus_L=None if cL is None else round(float(abs(1 + cL)), 3), L_mag=round(float(np.median(np.abs(L))), 3),
+                       drift=None if drift is None else round(drift, 1), passed=passed, lead_used=lead0, lead_next=self.lead,
+                       clip_frac=round(getattr(self, "clip_frac", 0.0), 4))
+            log(f"[계획] k {kk} 처프 구간 {i}: " + (("k 꺼짐(감시 발동)" if self.tripped else "k 안 켬(게이트 불통과·허용 k 초과·k ≥ 1.0인데 직전 ck 불통과)") if not on else
+                f"ψ_L {psi_l:+.0f}° |L| 공진 {abs(cL):.3f} |1+L| {abs(1 + cL):.2f}, 클립 {100 * rec['clip_frac']:.1f}%(충격 창 밖), 플랜트 ψ {psi:+.0f}°(식별 대비 {drift:+.0f}°) → "
+                + ('통과, k_ok = ' + str(self.k_ok) if passed else '불통과, k_ok ' + str(self.k_ok) + ' 유지') + f" | φ_lead {lead0:.0f} → {self.lead:.0f}°"), flush=True)
         self.results.append(rec)
