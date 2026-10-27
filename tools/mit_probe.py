@@ -129,6 +129,10 @@ class Probe:
         if t_mit is not None and t_mit > MODE_GRACE_S and st[2] != 0x04:
             return f"모드 피드백 {st[2]} (MOVE M=4 아님)"
         dev = np.degrees(np.abs(q - qref))
+        a = self.a
+        if a.chirp_early_dev and a.chirp_joint and t_mit is not None and a.chirp_start <= t_mit <= a.chirp_start + a.chirp_early_s \
+                and dev[a.chirp_joint - 1] > a.chirp_early_dev:  # 저주파 처프 첫 구간 이탈(8절 10/27 오전 8)
+            return f"처프 첫 {a.chirp_early_s:.0f} s 이탈 J{a.chirp_joint} {dev[a.chirp_joint - 1]:.2f}° > {a.chirp_early_dev}°"
         if dev.max() > self.a.dev_limit:
             return f"기준 이탈 J{int(dev.argmax()) + 1} {dev.max():.2f}° > {self.a.dev_limit}°"
         self.fast_n = self.fast_n + 1 if np.abs(qd).max() > SPEED_LIMIT else 0
@@ -580,6 +584,8 @@ def main():
     ap.add_argument("--chirp-amp", type=float, default=0.12, help="처프 진폭[N·m] — MIT 토크 한 칸 0.063, 최소 두 칸")
     ap.add_argument("--chirp-f0", type=float, default=2.0); ap.add_argument("--chirp-f1", type=float, default=20.0)
     ap.add_argument("--chirp-dur", type=float, default=20.0); ap.add_argument("--chirp-start", type=float, default=2.0)
+    ap.add_argument("--chirp-early-dev", type=float, default=0.0, help="처프 시작 뒤 --chirp-early-s 동안 처프 관절 이탈 상한[deg], 0이면 끔")
+    ap.add_argument("--chirp-early-s", type=float, default=2.0)
     ap.add_argument("--beep", type=float, default=0.0, help="MIT 진입 뒤 이 시각[s]에 툭 신호 표시(VIB D0 조건 b), 0이면 없음")
     ap.add_argument("--vib-joint", type=int, default=0, help="τ_vib를 넣을 관절(0이면 없음) — --tdc --joint와 같으면 dist_comp(torque)")
     ap.add_argument("--vib-law", choices=["vel", "ppf"], default="vel")
