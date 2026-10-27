@@ -200,8 +200,11 @@ class Probe:
                       + (" — 실제 토크는 TDE 반응으로 처프와 달라짐(10-24 가짜 팔: accel 최대 7배, torque 저주파 1/4·중간 3.3배)" if path != "τ_ff 직접" else " — 보낸 토크 = 처프"))
             if a.vib_joint:
                 from vib_damp import bp_phase_deg
-                print(f"[dry-run] τ_vib J{a.vib_joint}: {a.vib_law} k {a.vib_k}, 대역 {a.vib_band[0]}–{a.vib_band[1]} Hz(8 Hz 위상 "
-                      f"{bp_phase_deg(tuple(a.vib_band), 8.0, a.rate):+.1f}°), 게이트 기울기 ≥ {a.vib_gate}°, 포화 ±{a.vib_max} N·m"
+                pred = (f"공진기 예측 {a.vib_pred} Hz Q {a.vib_q}, φ_lead {a.vib_lead_deg:+.0f}°" if a.vib_pred_mode == "res"
+                        else f"대역 {a.vib_band[0]}–{a.vib_band[1]} Hz(8 Hz 위상 {bp_phase_deg(tuple(a.vib_band), 8.0, a.rate):+.1f}°, 옛 예측)")
+                print(f"[dry-run] τ_vib J{a.vib_joint}: {a.vib_law} k {a.vib_k}" + (f" → {a.vib_k2}({a.vib_k_switch} s)" if a.vib_k_switch else "")
+                      + f", {pred}" + (f", 노치 {a.vib_notch_f} Hz Q {a.vib_notch_q}" if a.vib_notch_f else ", 노치 없음")
+                      + f", 게이트 {a.vib_gate}–{a.vib_gate_hi}°, 클립 ±{a.vib_max} N·m, 감시 ①a 합 포화 ①b 클립 1 s 50% ② 20 Hz↑ rms > {a.vib_hf_max} 0.5 s"
                       + (", 데드밴드 반 칸" if a.vib_deadband else "") + (f", PPF {a.ppf_f} Hz ζ {a.ppf_zeta}" if a.vib_law == "ppf" else "")
                       + ", 경로 " + ("dist_comp(torque)" if a.vib_joint == a.joint and a.tdc else "τ_ff 직접"))
             if a.end_pos:
@@ -235,7 +238,8 @@ class Probe:
             vd = VibDamp(kin, ImuToBase(kin), VibDampCfg(law=a.vib_law, k=a.vib_k, band=tuple(a.vib_band), gate_deg=a.vib_gate,
                                                          deadband=a.vib_deadband, tau_max=a.vib_max, ppf_f=a.ppf_f, ppf_zeta=a.ppf_zeta,
                                                          pred_f=a.vib_pred, age_max=a.vib_age_max / 1000.0, pred_mode=a.vib_pred_mode,
-                                                         res_q=a.vib_q, lead_deg=a.vib_lead_deg, gate_hi=a.vib_gate_hi, hf_max=a.vib_hf_max))
+                                                         res_q=a.vib_q, lead_deg=a.vib_lead_deg, gate_hi=a.vib_gate_hi, hf_max=a.vib_hf_max,
+                                                         notch_f=a.vib_notch_f, notch_q=a.vib_notch_q))
         sent = None; mm_t = np.zeros(6); t_last = None
         beeped = not a.beep
         while True:
@@ -258,13 +262,13 @@ class Probe:
             chirp_now["v"] = chirp(a, tt) if a.chirp_joint else 0.0
             s = read_state(p)  # 읽기 → 계산 → 송신 (우리 P가 최신 위치를 쓰도록)
             tau = tff.copy()
-            vo = None
+            vo = None; sum_sat = False
             if vd is not None:  # τ_vib — 새 자이로 표본 전부를 표본 시각 기준으로 처리, 송신 직전 시각으로 예측
                 gs, ac = self.stream.gyro_after(vd.t_g)
                 vo = vd.step(tt, time.time(), s[0], s[1], gs, ac); self.vib_now["v"] = vo["tau"]
             if same:
                 c = chirp_now["v"] + self.vib_now["v"]; cc = float(np.clip(c, -a.vib_sum_max, a.vib_sum_max))
-                self.n_sat += int(cc != c); dist_now["v"] = cc
+                self.n_sat += int(cc != c); dist_now["v"] = cc; sum_sat = cc != c
             else:
                 dist_now["v"] = chirp_now["v"] if a.chirp_joint == a.joint else self.vib_now["v"]
             if self.ext_kp is not None:
@@ -284,6 +288,9 @@ class Probe:
                 if a.vib_joint and (a.vib_joint != a.joint or self.tdc is None):
                     tau[a.vib_joint - 1] += self.vib_now["v"]
             if self.ext_kp is not None or self.ext_kd is not None or self.tdc is not None or a.chirp_joint or a.vib_joint:
+                if vd is not None:  # 감시 ①a: 처프 + τ_vib 합 포화, 또는 τ_vib가 없었으면 안 닿았을 명령 상한(TDE 혼자 튐에 닿는 것은 뺌)
+                    tj = tau[a.vib_joint - 1]; tv = self.vib_now["v"]
+                    vd.note_sum_sat((same and sum_sat) or (abs(tj) >= TAU_CMD_LIMIT and abs(tj - tv) < TAU_CMD_LIMIT))
                 tau = np.clip(tau, -TAU_CMD_LIMIT, TAU_CMD_LIMIT)
             if self.tdc is not None:
                 self.tw.writerow([f"{now - self.t0:.4f}", f"{co['e']:.6f}", f"{co['ed']:.5f}", f"{co['qdd_f']:.4f}", f"{ar:.5f}",
@@ -587,6 +594,8 @@ def main():
     ap.add_argument("--vib-q", type=float, default=1.0, help="공진기 Q")
     ap.add_argument("--vib-lead-deg", type=float, default=0.0, help="φ_lead[deg] — θ = ω₀a + φ_lead, 60 넘기지 말 것")
     ap.add_argument("--vib-gate-hi", type=float, default=37.0, help="기울기 게이트 상한[deg]")
+    ap.add_argument("--vib-notch-f", type=float, default=0.0, help="τ_vib 입력 노치 중심[Hz], 0이면 끔(8절 10/27 오전 3: 29.6)")
+    ap.add_argument("--vib-notch-q", type=float, default=1.5, help="노치 Q(1.5면 8 Hz −11°)")
     ap.add_argument("--vib-hf-max", type=float, default=0.02, help="감시: τ_vib 16 Hz 이상 rms(0.25 s) 상한[N·m]")
     ap.add_argument("--fake-inertia", type=float, default=0.05, help="가짜 팔 관절 관성[kg·m²] — 실기 고주파 실효 관성은 TDE M̄ 0.01 수준")
     ap.add_argument("--fake-enc-delay", type=int, default=0, help="가짜 팔: 엔코더(q, q̇) 보고를 N번 읽기 늦춤 — 자이로·엔코더 강체 몫 고주파 불일치")
@@ -602,8 +611,8 @@ def main():
     ap.add_argument("--fake-tap", type=float, default=5.0, help="가짜 IMU 모드에 툭(속도 충격)을 넣을 MIT 시각[s], 0이면 없음")
     ap.add_argument("--fake-delay", type=float, default=10.0, help="가짜 IMU 자이로 전달 지연[ms]")
     a = ap.parse_args()
-    if a.vib_lead_deg > 60:
-        raise SystemExit("φ_lead는 60° 이하(8절 10/26 밤 4)")
+    if abs(a.vib_lead_deg) > 180:
+        raise SystemExit("φ_lead는 ±180° 안(8절 10/27 오전 4: 상한 없음, 1–5 Hz |L| 확인 조건)")
     if a.vib_joint and ((a.chirp_joint and a.chirp_joint != a.vib_joint) or a.vib_max > 0.5 or a.vib_sum_max > 0.5
                         or (a.vib_joint == a.joint and a.tdc and a.dist_mode != "torque")):
         raise SystemExit("τ_vib: 처프는 같은 관절만, 포화 0.5 N·m 이하, TDC 관절이면 --dist-mode torque(8절 10/26)")

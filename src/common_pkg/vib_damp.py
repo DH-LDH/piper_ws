@@ -39,12 +39,21 @@ class VibDampCfg:
     lead_deg: float = 0.0      # φ_lead — 회전각 θ = ω₀a + φ_lead
     gate_hi: float = 37.0      # 기울기 상한(8절 10/26 밤 5: 위상 확인된 범위 35–37°)
     hf_max: float = 0.02       # 감시: τ_vib 16 Hz 이상 rms(0.25 s) 상한[N·m]
+    hf_win: int = 50           # 감시 ② rms 창[주기] — 0.5 s(8절 10/27 오전 3)
+    hf_hold: float = 0.5       # 감시 ②: 상한 초과가 이만큼 연속일 때만 끔[s] — 충격 한 번의 27 Hz 울림은 넘김(8절 10/27 오전 3)
+    clip_win: int = 100        # 감시 ①b: 클립에 붙은 주기 비율 창[주기] — 1 s(8절 10/27 오전 4)
+    clip_frac: float = 0.5     # 감시 ①b: 창 안 클립 비율 상한 — 충격 한 번은 0.13–0.32 s라 넘김
+    sum_n: int = 10            # 감시 ①a: 최근 50주기 중 합 포화(처프 + τ_vib 또는 명령 상한) 횟수 상한
+    notch_f: float = 0.0       # res 입력 노치 중심[Hz], 0이면 끔(8절 10/27 저녁: 29.6 Hz — 25–35 Hz 국소 모드)
+    notch_q: float = 1.5       # 노치 Q — 1.5면 8 Hz −11°
 
 
 def pred_gain(f, a, cfg):  # 연속계 |v̂/x|·위상(지연 a 뒤 v 대비 아님, 입력 v 대비) — res·old 공통 검토용
     s = 1j * 2 * math.pi * np.asarray(f, float); w0 = 2 * math.pi * cfg.pred_f; th = w0 * a + math.radians(cfg.lead_deg)
     if cfg.pred_mode == "res":
         hp = s / (s + 2 * math.pi * cfg.hp_f); eta = (w0 * w0 / cfg.res_q) / (s * s + (w0 / cfg.res_q) * s + w0 * w0) * hp
+        if cfg.notch_f:
+            wn = 2 * math.pi * cfg.notch_f; eta = eta * (s * s + wn * wn) / (s * s + (wn / cfg.notch_q) * s + wn * wn)
         return (s * eta / w0) * math.cos(th) - eta * math.sin(th)
     th_h = 1 / (2 * math.pi * cfg.band[0]); tl = 1 / (2 * math.pi * cfg.band[1])
     HP = th_h * s / (1 + th_h * s); LP = 1 / (1 + tl * s)
@@ -65,13 +74,16 @@ class VibDamp:
         self.hp = 0.0; self.x_prev = None; self.lp = 0.0; self.t_g = None
         self.xi = 0.0; self.eta = 0.0; self.eta_d = 0.0
         self.h1 = 0.0; self.x1_prev = None; self.r = 0.0; self.rd = 0.0  # res: 1 Hz 고역통과, 공진기 η·η'
+        self.np_ = self.nq = 0.0; self.nx_prev = None  # 노치 상태
         self.enc = collections.deque(maxlen=40)   # (t, q, q̇ 원값, 튐 후보 관절 bool[6])
         self.qd_good = None
         self.acc = []; self.tilt = None; self.enabled = False
         self.v = self.vf = self.vfd = 0.0; self.wy = self.ey = 0.0
         self.tau = 0.0; self.stale_n = 0
-        self.hist = collections.deque(maxlen=50); self.tripped = None; self.trip_why = ""  # 감시 ①: 최근 50주기(0.5 s) 중 포화 10회 이상(10-26 k 0.2 25 Hz 리밋 사이클)
-        self.hf = collections.deque(maxlen=25); self.thp = 0.0; self.t_prev_tau = 0.0; self.t_last = None  # 감시 ②: τ_vib 16 Hz 고역 rms(0.25 s) > hf_max — 성장 단계에서 끔
+        self.hist = collections.deque(maxlen=cfg.clip_win); self.tripped = None; self.trip_why = ""  # 감시 ①b: 최근 1 s 중 τ_vib가 클립에 붙은 비율(사각파 발진)
+        self.sum_hist = collections.deque(maxlen=50)  # 감시 ①a: 합 포화 — note_sum_sat()로 mit_probe가 알려 줌
+        self.hp4 = [[0.0, 0.0], [0.0, 0.0]]; self.hp4_u = 0.0  # 감시 ②: 4차 Butterworth 20 Hz 고역(2차 두 단), 8 Hz 통과 0.026
+        self.hf = collections.deque(maxlen=cfg.hf_win); self.hf_since = None; self.thp = 0.0; self.t_prev_tau = 0.0; self.t_last = None  # 감시 ②: τ_vib 16 Hz 고역 rms(0.25 s) > hf_max — 성장 단계에서 끔
         self.n_samples = self.n_reject = self.n_stale = self.n_cycles = self.n_badtime = 0
 
     def _add_encoder(self, t, q, qd):  # 한 주기 점프 > 문턱인 관절을 튐 후보로 — 판정은 자이로 표본 처리 때
@@ -118,6 +130,20 @@ class VibDamp:
         k3 = f(r + h / 2 * k2[0], rd + h / 2 * k2[1], um); k4 = f(r + h * k3[0], rd + h * k3[1], u1)
         self.r = r + h / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]); self.rd = rd + h / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
 
+    def _notch(self, x, h):  # (s² + ωn²)/(s² + (ωn/Q)s + ωn²) = 1 − 대역통과, RK4 4 ms 이하 소단계(ωn·h가 커지는 빈틈 대비)
+        if self.nx_prev is None:
+            self.nx_prev = x
+        wn = 2 * math.pi * self.c.notch_f; b = wn / self.c.notch_q; x0 = self.nx_prev; self.nx_prev = x
+        f = lambda p, q, u: (q, u - wn * wn * p - b * q)  # q = s/(s² + b s + ωn²)·x
+        n = max(1, math.ceil(h / 0.004)); hs = h / n; p, q = self.np_, self.nq
+        for i in range(n):
+            ua = x0 + (x - x0) * i / n; ub = x0 + (x - x0) * (i + 1) / n; um = (ua + ub) / 2
+            k1 = f(p, q, ua); k2 = f(p + hs / 2 * k1[0], q + hs / 2 * k1[1], um)
+            k3 = f(p + hs / 2 * k2[0], q + hs / 2 * k2[1], um); k4 = f(p + hs * k3[0], q + hs * k3[1], ub)
+            p += hs / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]); q += hs / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
+        self.np_, self.nq = p, q
+        return x - b * q
+
     def _sample(self, t_g, g_raw, Jw, R):  # Jw·R은 주기당 1회 계산값 재사용(표본마다 0.5 ms × 몰림 최대 40개 → 루프 멈춤, 8절 10/26 밤 7)
         q, raw, held, cand = self._qd_at(t_g)
         wy = float((R @ np.asarray(g_raw))[1])
@@ -130,7 +156,7 @@ class VibDamp:
         self.t_g = t_g; self.wy, self.ey = wy, ey; self.v = wy - ey
         if 0 < h < 0.2:
             if self.c.pred_mode == "res":
-                self._resonator(self.v, h)
+                self._resonator(self._notch(self.v, h) if self.c.notch_f else self.v, h)
                 self.vf = self.rd / (2 * math.pi * self.c.pred_f)
             else:
                 self.vf, self.vfd = self._bandpass(self.v, h)
@@ -150,6 +176,25 @@ class VibDamp:
     def _predict_res(self, a):  # res: v̂ = (η'/ω₀)cos θ − η sin θ — 고주파에서 두 항 다 줄어듦
         w = 2 * math.pi * self.c.pred_f; th = w * a + math.radians(self.c.lead_deg)
         return self.rd / w * math.cos(th) - self.r * math.sin(th)
+
+    def _hp4(self, u, h):  # 4차 Butterworth 20 Hz 고역 = 2차 고역 두 단(Q 0.541·1.307), RK4 4 ms 이하 소단계 — 감시 전용(루프 밖)
+        wc = 2 * math.pi * 20.0; u0 = self.hp4_u; self.hp4_u = u; n = max(1, math.ceil(h / 0.004)); hs = h / n
+        y = u
+        for i in range(n):
+            xa = u0 + (u - u0) * i / n; xb = u0 + (u - u0) * (i + 1) / n
+            for st, Q in zip(self.hp4, (0.5412, 1.3066)):  # 단마다 입력 = 앞 단 출력(소단계 처음·끝 선형)
+                b_ = wc / Q; f = lambda p, v, w: (v, w - b_ * v - wc * wc * p)
+                p, v = st; xm = (xa + xb) / 2
+                k1 = f(p, v, xa); k2 = f(p + hs / 2 * k1[0], v + hs / 2 * k1[1], xm)
+                k3 = f(p + hs / 2 * k2[0], v + hs / 2 * k2[1], xm); k4 = f(p + hs * k3[0], v + hs * k3[1], xb)
+                ya = xa - b_ * v - wc * wc * p
+                p += hs / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]); v += hs / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
+                st[0], st[1] = p, v; xa, xb = ya, xb - b_ * v - wc * wc * p
+            y = xb
+        return y
+
+    def note_sum_sat(self, sat):  # mit_probe가 송신 직전에 알려 줌 — 처프 + τ_vib 합 포화 또는 명령 상한
+        self.sum_hist.append(bool(sat))
 
     def step(self, t_mit, now, q, qd, gyro_samples, accel_raw):
         c = self.c
@@ -189,13 +234,15 @@ class VibDamp:
             tau = 0.0
         self.hist.append(abs(tau) >= 0.9 * c.tau_max)
         dtc = (now - self.t_last) if self.t_last is not None else 0.01; self.t_last = now
-        ah = 1 / (1 + 2 * math.pi * 16.0 * dtc); self.thp = ah * (self.thp + tau - self.t_prev_tau); self.t_prev_tau = tau
-        self.hf.append(self.thp)
+        self.hf.append(self._hp4(tau, dtc))
         hf_rms = float(np.sqrt(np.mean(np.square(self.hf)))) if len(self.hf) == self.hf.maxlen else 0.0
-        if self.tripped is None and sum(self.hist) >= 10:
-            self.tripped = t_mit; self.trip_why = "0.5 s에 포화 10회 이상"
-        if self.tripped is None and hf_rms > c.hf_max:
-            self.tripped = t_mit; self.trip_why = f"16 Hz 이상 rms {hf_rms:.3f} > {c.hf_max} N·m"
+        if self.tripped is None and len(self.hist) == self.hist.maxlen and sum(self.hist) >= c.clip_frac * self.hist.maxlen:
+            self.tripped = t_mit; self.trip_why = f"클립에 붙은 주기 {sum(self.hist)}/{self.hist.maxlen}(①b)"
+        if self.tripped is None and sum(self.sum_hist) >= c.sum_n:
+            self.tripped = t_mit; self.trip_why = f"합 포화 {sum(self.sum_hist)}회/0.5 s(①a)"
+        self.hf_since = (self.hf_since if self.hf_since is not None else t_mit) if hf_rms > c.hf_max else None
+        if self.tripped is None and self.hf_since is not None and t_mit - self.hf_since >= c.hf_hold:
+            self.tripped = t_mit; self.trip_why = f"20 Hz 이상 rms {hf_rms:.3f} > {c.hf_max} N·m" + (f" {c.hf_hold:.1f} s 연속" if c.hf_hold else "") + "(②)"
         if self.tripped is not None:
             tau = 0.0
         self.tau = tau
