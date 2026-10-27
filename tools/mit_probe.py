@@ -265,7 +265,7 @@ class Probe:
             if tt > dur:
                 break
             qr = q_hold.copy(); vr = np.zeros(6); ar = 0.0
-            if a.stage == "sine" and tt > hold_s:  # 진폭을 2 s 동안 0→A로 올림(급출발 방지), --sine-joints면 여러 관절 같은 위상(a′)
+            if a.stage == "sine" and hold_s < tt <= hold_s + a.cycles / a.hz:  # 진폭을 2 s 동안 0→A로 올림(급출발 방지), --sine-joints면 여러 관절 같은 위상(a′) — 주기 끝나면 꼬리 2 s는 유지 자세(10-27까지는 꼬리에도 사인이 이어졌음, E4 16절)
                 ts = tt - hold_s; ramp = min(1.0, ts / 2.0)
                 w = 2 * math.pi * a.hz; A = math.radians(a.amp) * ramp
                 for jj in ([j - 1 for j in a.sine_joints] if a.sine_joints else [j6]):
