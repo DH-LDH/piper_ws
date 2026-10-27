@@ -2,7 +2,7 @@
 """D3 지표(8절 10/27 오후 16) — 운동 외란 사인(vib_probe slow·mit_probe sine) 한 회씩.
 
 창: 사인 시작 + 램프 2 s ~ 시작 + cycles/hz(꼬리 없음), MIT 순간 튐(엔코더 한 주기 > 0.7 rad/s) ±0.5 s 제외.
-지표: IMU 5–10 Hz rms(카메라 축 acc z·gyro x), 사인 관절별 위치·각속도 추종 오차 rms(q̇_ref는 q_ref 미분), 시작 기울기(사인 전 유지 구간, 같은 자세).
+지표: IMU 5–10 Hz rms(카메라 축 acc z·gyro x·각가속도 = gyro x 미분), 사인 관절별 위치·각속도 추종 오차 rms(q̇_ref는 q_ref 미분), 시작 기울기(사인 전 유지 구간, 같은 자세).
 사용: python3 tools/vib_d3_report.py logs/vib/…_slow_….csv logs/mit/…_sine.csv …
 """
 import os
@@ -15,9 +15,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from imu_frame import static_tilt  # noqa: E402
 
 
-def bp_rms(t, x, keep, fs):
+def bp_rms(t, x, keep, fs, deriv=False):  # deriv면 주파수 영역 미분(jω) — 자이로 → 각가속도
     tu = np.arange(t[0], t[-1], 1 / fs); xu = np.interp(tu, t, x); X = np.fft.rfft(xu - xu.mean()); f = np.fft.rfftfreq(len(xu), 1 / fs)
-    X[(f < 5) | (f > 10)] = 0; y = np.fft.irfft(X, len(xu)); k = np.interp(tu, t, keep.astype(float)) > 0.99
+    X[(f < 5) | (f > 10)] = 0
+    if deriv:
+        X = X * 2j * np.pi * f
+    y = np.fft.irfft(X, len(xu)); k = np.interp(tu, t, keep.astype(float)) > 0.99
     return float(np.sqrt(np.mean(y[k] ** 2))) if k.sum() > 50 else float("nan")
 
 
@@ -44,8 +47,10 @@ def report(p, hz=0.25):
         for q in sp:
             keep &= np.abs(tsv - q) > 0.5
         res.append(bp_rms(tsv, s[ax].values, keep, fs))
+        if st == "g":
+            res.append(bp_rms(tsv, s[ax].values, keep, fs, deriv=True))
     tilt = static_tilt(p, ts - 1.5, ts - 0.1)
-    print(f"{os.path.basename(p)[:15]} {ph:4s} J{J} | 창 {t1 - t0:.1f} s 튐 {len(sp)}(제외 {100 * (1 - ok.mean()):.0f}%) | IMU 5–10 Hz acc z {res[0]:.3f} gyro x {res[1]:.4f} | "
+    print(f"{os.path.basename(p)[:15]} {ph:4s} J{J} | 창 {t1 - t0:.1f} s 튐 {len(sp)}(제외 {100 * (1 - ok.mean()):.0f}%) | IMU 5–10 Hz acc z {res[0]:.3f} gyro x {res[1]:.4f} 각가속도 {res[2]:.2f} rad/s² | "
           + " ".join(f"J{j} 위치 {err[j][0]:.3f}° 각속도 {err[j][1]:.4f} rad/s" for j in J) + f" | 시작 기울기 {tilt:.2f}°")
 
 
