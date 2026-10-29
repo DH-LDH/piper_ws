@@ -48,7 +48,7 @@ def report(p, tb):
     J = [j for j in range(1, 7) if np.ptp(m[f"qref{j}"].values) > 1.0]  # 사인 관절
     mv = np.abs(m[f"qref{J[0]}"].values - m[f"qref{J[0]}"].values[0]) > 0.05; ts = t[mv][0]
     tq = np.arange(ts, t[mv][-1], 0.005); qr = np.interp(tq, t, m[f"qref{J[0]}"].values); F = np.abs(np.fft.rfft(qr - qr.mean(), 8 * len(qr)))
-    hz = float(np.fft.rfftfreq(8 * len(qr), 0.005)[np.argmax(F[1:]) + 1])  # 사인 주파수(0.25·0.5 Hz)
+    hz = round(20 * float(np.fft.rfftfreq(8 * len(qr), 0.005)[np.argmax(F[1:]) + 1])) / 20  # 사인 주파수(0.25·0.5 Hz), 0.05 Hz 격자로 맞춤 — FFT 오차가 창 길이를 바꾸지 않게
     cyc = round((t[mv][-1] - ts) * hz) / hz  # 실제 주기 수(꼬리 버그 회도 주기 끝에서 자름)
     t0, t1 = ts + 2.0, ts + cyc; w = (t >= t0) & (t <= t1); mm = m[w]; tt = mm.t.values
     qd = np.abs(np.diff(np.radians(mm[[f"q{j}" for j in range(1, 7)]].values), axis=0)) / np.maximum(np.diff(tt)[:, None], 1e-3)
