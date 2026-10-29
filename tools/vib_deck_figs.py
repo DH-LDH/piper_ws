@@ -5,7 +5,10 @@
 2 d3_time_spec: a′ 0.25 Hz ①②④-off 대표 회 acc z 5–10 Hz 시간 응답 + 2–20 Hz 스펙트럼
 3 td_sens: 실시간 Td 분포(10-29 (가) 5회) + 143718·145621 감도 비 |S_k|/|S_0|
 4 limit_cycle: 172154 τ_vib 시간 응답 + 노치(29.6 Hz, Q 1.5) 이득
-사용: source install/setup.bash; python3 tools/vib_deck_figs.py [1 2 3 4]
+5 load_limit: 부하 질량 vs a′ 중 J2 명령 하위 1%·클립(21-8·21-10)
+6 seg_timeline: 감쇠 가능 구간 — (가) 실시간 22-1, (나) 오프라인 22-5
+7 xy_axes: xy 축별 ① 대비 비(①②④-off 각 3회 평균, 21-11)
+사용: source install/setup.bash; python3 tools/vib_deck_figs.py [1 … 7]
 """
 import os
 import sys
@@ -143,7 +146,85 @@ def fig_lc():
     fig.tight_layout(); save(fig, "limit_cycle")
 
 
+def fig_load():  # 부하 질량 vs a′ 중 J2 명령 토크(하위 1%·클립) — 21-8·21-10
+    runs = {0.0: ["20261027_105921", "20261027_110326", "20261027_110726"], 0.2: ["20261029_190551", "20261029_190931", "20261029_191206"],
+            0.3: ["20261029_200511", "20261029_200846", "20261029_201255"], 0.4: ["20261029_194245"]}
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(15, 5.6))
+    for kg, tags in runs.items():
+        p1, cl = [], []
+        for t in tags:
+            d = pd.read_csv(os.path.join(MIT, f"{t}_sine.csv")); x = d[d.phase == "mit"].tff2.values
+            p1.append(np.percentile(x, 1)); cl.append(100 * np.mean(np.abs(x) >= 3.9))
+        col = C2 if kg == 0.2 else C1
+        a1.scatter([kg] * len(p1), p1, s=110, color=col, edgecolors="white", linewidths=2, zorder=3)
+        a2.scatter([kg] * len(cl), cl, s=110, color=col, edgecolors="white", linewidths=2, zorder=3)
+        a1.annotate(f"{np.mean(p1):.2f}", (kg, np.mean(p1)), xytext=(10, 0), textcoords="offset points", fontsize=11, color=INK2, va="center")
+        a2.annotate(f"{np.mean(cl):.1f}%", (kg, np.mean(cl)), xytext=(10, 0), textcoords="offset points", fontsize=11, color=INK2, va="center")
+    a1.axhline(-4.0, color=INK, lw=1.5, ls="--"); a1.text(-0.04, -4.0, "명령 상한 −4.0", va="bottom", ha="left", fontsize=11)
+    a2.axhline(5, color=INK, lw=1.5, ls="--"); a2.text(-0.04, 5, "중단 기준 5%", va="bottom", ha="left", fontsize=11)
+    for a in (a1, a2):
+        a.set_xticks([0, 0.2, 0.3, 0.4]); a.set_xticklabels(["무부하", "0.2 kg\n(손가락 파지)", "0.3 kg\n(플랜지, 주 값)", "0.4 kg\n(중단)"]); a.set_xlim(-0.05, 0.45)
+    a1.set_ylabel("J2 명령 토크 하위 1% [N·m (eff)]"); a1.set_title("a′ 0.25 Hz 중 J2 명령(TDE) — 유지 토크보다 1.0–1.3 큼", loc="left")
+    a2.set_ylabel("명령 상한 도달 비율 [%]"); a2.set_title("J2 명령 클립", loc="left")
+    fig.suptitle("부하 상한 약 0.3 kg(가반 20%) — 0.4 kg에서 J2 명령이 상한에 닿아 클립 13.6%", x=0.01, ha="left", fontsize=15)
+    fig.tight_layout(); save(fig, "load_limit")
+
+
+def fig_seg():  # 감쇠 가능 구간 타임라인 — (가) 실시간 판정 22-1, (나) 오프라인 22-5
+    GA = [("163243", 32.8, "--x--", "     "), ("102416 ④-on", 32.8, "-----", "     "), ("101912", 34.2, "--G-G", "  *  "),
+          ("103052", 38.6, "GG-GG", "*  * "), ("104447", 40.2, "-GGGG", " *** "), ("105310 ④-on", 40.3, "GGGGG", " * * ")]
+    NA = [("151607", 35.6, "GG", "* "), ("143718", 36.1, "GG", "* "), ("145621", 36.0, "GG", "  "),
+          ("150714", 40.2, "-G", "  "), ("142840", 40.6, "-G", "  "), ("142200", 42.1, "G-", "  ")]
+    kon = {"103052": (1, 2), "105310 ④-on": (1, 2, 3)}
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(15, 6.2), gridspec_kw={"width_ratios": [2.4, 1]})
+    for ax, rows, cols in ((a1, GA, ["식별", "k 0.2", "k 0.5", "k 1.0", "재식별"]), (a2, NA, ["처프 A (k 0)", "처프 B (k > 0)"])):
+        for r, (name, tl, g, s) in enumerate(rows):
+            for c in range(len(cols)):
+                star = s[c] == "*"; gate = g[c] == "G"
+                fc = C1 if star else "#b7d3f6" if gate else "#f0efec"
+                ax.add_patch(plt.Rectangle((c + 0.04, r + 0.08), 0.92, 0.84, color=fc, ec="white", lw=2))
+                lab = "★" if star else "G" if gate else ""
+                if ax is a1 and c in kon.get(name, ()):
+                    lab += " k on"
+                ax.text(c + 0.5, r + 0.5, lab, ha="center", va="center", fontsize=12, color="white" if star else INK)
+        ax.set_xlim(0, len(cols)); ax.set_ylim(len(rows), 0); ax.grid(False)
+        ax.set_xticks(np.arange(len(cols)) + 0.5); ax.set_xticklabels(cols)
+        ax.set_yticks(np.arange(len(rows)) + 0.5); ax.set_yticklabels([f"{n}  ({t:.1f}°)" for n, t, _, _ in rows])
+        for sp in ax.spines.values():
+            sp.set_visible(False)
+        ax.tick_params(length=0)
+    a1.set_title("(가) 시행 안 식별 6회 — 18 s 구간, 실시간 판정: 8/24", loc="left")
+    a2.set_title("(나) φ_lead 고정 6회 — 오프라인: 2/6", loc="left")
+    fig.suptitle("감쇠 가능 구간 — 33° 무리 0/8, 38–40° 무리 7/12, 연속은 104447 한 번(54 s)", x=0.01, ha="left", fontsize=15)
+    fig.text(0.01, -0.04, "G = 게이트 조건 충족(H ≥ 0.5·잔차 ≤ 35°·설명력 ≥ 0.7·절반 ψ 차 ≤ 30°), ★ = G이고 다음 구간과 |Δψ| ≤ 30°(감쇠 가능). 마지막 구간은 다음이 없어 ★ 판정 밖. "
+             "(가)+(나)를 같은 오프라인 잣대로 다시 세면 11/30(37%).", fontsize=10, color=INK2)
+    fig.tight_layout(); save(fig, "seg_timeline")
+
+
+def fig_xy():  # xy 축별 분해 — ①·②·④-off 각 3회 평균, ① 대비 비(21-11)
+    import vib_axes_report as A
+    from imu_frame import ImuToBase
+    from piper_kin import PiperKin
+    tb = ImuToBase(PiperKin())
+    g = {"①": ["vib/20261029_110132_slow_j12_sxy", "vib/20261029_204150_slow_j12_sxy", "vib/20261029_204228_slow_j12_sxy"],
+         "②": ["mit/20261029_112234_sine", "mit/20261029_201957_sine", "mit/20261029_203040_sine"],
+         "④-off": ["mit/20261029_112534_sine", "mit/20261029_202438_sine", "mit/20261029_203303_sine"]}
+    K = [("gy_5_10", "피치\n(J2 평면)"), ("gz_5_10", "요\n(J1)"), ("gx_5_10", "롤"), ("a|_5_10", "|acc|"), ("g|_5_10", "|gyro|")]
+    m = {c: pd.DataFrame([A.report(os.path.join(ROOT, "logs", f"{p}.csv"), tb) for p in ps])[[k for k, _ in K]].mean() for c, ps in g.items()}
+    fig, ax = plt.subplots(figsize=(11, 5.6)); x = np.arange(len(K)); w = 0.36
+    for i, (c, col) in enumerate((("②", C1), ("④-off", C2))):
+        r = (m[c] / m["①"]).values
+        ax.bar(x + (i - 0.5) * w, r, w - 0.04, color=col, label=f"{c} / ①", zorder=2)
+        for xx, rr in zip(x + (i - 0.5) * w, r):
+            ax.text(xx, rr + 0.02, f"{rr:.2f}", ha="center", fontsize=11, color=INK)
+    ax.axhline(1, color=INK2, lw=1); ax.axhline(0.83, color=INK, lw=1.2, ls="--", label="감소 문턱 0.83")
+    ax.set_xticks(x); ax.set_xticklabels([l for _, l in K]); ax.set_ylabel("① 위치 모드 대비 비 (5–10 Hz rms)"); ax.set_ylim(0, 1.35)
+    ax.legend(loc="upper left", frameon=False, ncol=3)
+    ax.set_title("xy(J1+J2) — 각 3회 평균: J2 평면(피치)도 거의 안 줄고, |acc|·|gyro| 차이 없음", loc="left")
+    fig.tight_layout(); save(fig, "xy_axes")
+
+
 if __name__ == "__main__":
-    which = sys.argv[1:] or ["1", "2", "3", "4"]
+    which = sys.argv[1:] or ["1", "2", "3", "4", "5", "6", "7"]
     for w in which:
-        {"1": fig_state, "2": fig_d3, "3": fig_td, "4": fig_lc}[w]()
+        {"1": fig_state, "2": fig_d3, "3": fig_td, "4": fig_lc, "5": fig_load, "6": fig_seg, "7": fig_xy}[w]()
