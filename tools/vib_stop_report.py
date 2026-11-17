@@ -108,15 +108,19 @@ def analyze(path, a, kin_tb):
     imu = load_imu(ip, t0, a.imu_lag / 1000.0); t = d.t.values; rows = []; fig = None
     mv = np.where(np.abs(np.diff(d[[f"qref{k}" for k in range(1, 7)]].values, axis=0)).max(1) > 1e-4)[0]
     t_still = (t[0] + 0.3, t[mv[0]] - 0.1 if len(mv) else t[-1])  # 움직이기 전 정지 구간 — 기울기·잡음 바닥
+    args = meta.get("args", {}); sl = stops(d, meta, a.all)
+    if not sl and not len(mv):  # 툭 기록(qref 고정) — 2–20 Hz 자이로 크기가 가장 큰 시각을 정지 시각으로 둠
+        tg0, G0 = resamp(*imu["g"], t[0] + 1.0, min(t[-1], imu["g"][0][-1]))
+        t_tap = float(tg0[np.argmax(np.linalg.norm(np.column_stack([band(G0[:, c], 2, 20) for c in range(3)]), axis=1))])
+        sl = [("tap", t_tap, 2, t[-1])]; t_still = (t[0] + 0.3, t_tap - 0.3)
     ga = imu["a"]; w = (ga[0] > t_still[0]) & (ga[0] < t_still[1])
     g = ga[1][w].mean(0) if w.sum() > 20 else np.full(3, np.nan); tilt = float(np.degrees(np.arctan2(g[1], -g[2])))
-    args = meta.get("args", {})
-    for name, t_cmd, j, t_lim in stops(d, meta, a.all):
+    for name, t_cmd, j, t_lim in sl:
         tu = np.arange(max(t[0], t_cmd - 1.5), min(t[-1], t_cmd + a.win + 1.0), 1 / FS); q = np.interp(tu, t, d[f"q{j}"].values)
         v = signal.savgol_filter(q, 11, 2, deriv=1, delta=1 / FS)  # 엔코더 속도[deg/s] — 속도 피드백은 잡음(0.1 rad/s)이 커서 위치 미분
         pre = (tu > t_cmd - 0.5) & (tu < t_cmd + 0.1); v_run = float(v[pre][np.argmax(np.abs(v[pre]))]) if pre.sum() > 5 else 0.0  # 정지 직전 실제로 도달한 최고 속도
-        thr = max(0.05 * abs(v_run), a.v_thr); n = int(0.1 * FS); below = np.abs(v) < thr; i0 = int(np.searchsorted(tu, t_cmd - 0.05)); t_enc = None
-        for i in range(i0, len(tu) - n):
+        thr = max(0.05 * abs(v_run), a.v_thr); n = int(0.1 * FS); below = np.abs(v) < thr; i0 = int(np.searchsorted(tu, t_cmd - 0.05)); t_enc = t_cmd + 0.1 if name == "tap" else None
+        for i in range(i0, len(tu) - n if t_enc is None else 0):
             if below[i:i + n].all():
                 t_enc = tu[i]; break
         if t_enc is None:
@@ -170,7 +174,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--win", type=float, default=2.0, help="정지 창 길이[s]")
-    ap.add_argument("--v-thr", type=float, default=0.3, help="엔코더 정지 판정 속도 하한[deg/s] (등속의 5%와 큰 쪽)")
+    ap.add_argument("--v-thr", type=float, default=0.3, help="엔코더 정지 판정 속도 하한[deg/s] (등속의 5%%와 큰 쪽)")
     ap.add_argument("--axis", default="auto", help="자이로 주축 x/y/z 또는 auto")
     ap.add_argument("--floor", type=float, default=0.0, help="잡음 바닥 포락선[rad/s] (B-3 값) — 0이면 기록 안 정지 구간")
     ap.add_argument("--imu-lag", type=float, default=0.0, help="IMU가 엔코더보다 늦는 시간[ms] (B-5 값)")

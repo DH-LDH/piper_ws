@@ -324,7 +324,7 @@ def main():
     ap.add_argument("--cycles", type=float, default=3.0)
     ap.add_argument("--target", type=float, nargs=6, default=None, help="goto 목표 관절각[deg]")
     ap.add_argument("--vmax", type=float, default=5.0, help="goto 최고 관절 속도[deg/s]")
-    ap.add_argument("--spd", type=int, default=10, help="위치 모드 속도 비율[%] (mit_probe 정지 확인과 같은 10)")
+    ap.add_argument("--spd", type=int, default=10, help="위치 모드 속도 비율[%%] (mit_probe 정지 확인과 같은 10)")
     ap.add_argument("--dev-limit", type=float, default=3.0, help="기준 이탈 중단 한계[deg]")
     ap.add_argument("--speed-limit", type=float, default=0.5, help="|q̇ − q̇_ref| 중단 한계[rad/s]")
     ap.add_argument("--speed-consec", type=int, default=6, help="속도 한계 연속 주기(200 Hz에서 30 ms) — 툭 친 순간은 통과")
