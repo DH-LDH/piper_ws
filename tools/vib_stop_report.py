@@ -29,7 +29,8 @@ COLS = ["file", "fw", "sdk", "joint", "speed_dps", "dist_deg", "stop", "tilt_deg
 
 def load_imu(path, t0, lag=0.0):  # → {"a": (t, xyz), "g": (t, xyz)} — 장치 시각 + 수신 시각 최소 지연으로 기록 시각 축에
     d = pd.read_csv(path); off = d.t.values - d.t_dev.values / 1000; ok = np.abs(off - np.median(off)) < 1.0
-    d = d[ok]; tt = d.t_dev.values / 1000 + np.percentile(off[ok], 1) - t0 - lag; out = {}
+    d = d[ok]; late = d.t.values > d.t.values[0] + 4.0  # D455는 시작 3.5 s 동안 장치 시각이 45–65 ms 흔들림(FW191_B 1절) — 그 뒤 표본으로 맞춤
+    tt = d.t_dev.values / 1000 + np.percentile(off[ok][late] if late.sum() > 200 else off[ok], 1) - t0 - lag; out = {}
     for k in "ag":
         m = (d.stream == k).values; out[k] = (tt[m], d[["x", "y", "z"]].values[m])
     return out

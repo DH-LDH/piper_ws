@@ -17,7 +17,10 @@ def load(path, fs):
         for r in csv.DictReader(f):
             s[r["stream"]].append((float(r["t"]), float(r["t_dev"]) / 1000.0, float(r["x"]), float(r["y"]), float(r["z"])))
     a, g = np.array(s["a"]), np.array(s["g"])
-    off = np.min(np.r_[a[:, 0] - a[:, 1], g[:, 0] - g[:, 1]])  # 수신 − 장치 시각의 최솟값 = 전송 지연이 가장 짧았던 표본
+    med = np.median(np.r_[a[:, 0] - a[:, 1], g[:, 0] - g[:, 1]])  # D455 첫 표본은 장치 시각 기준이 달라 버림(vib_stop_report와 같은 규칙)
+    a, g = a[np.abs(a[:, 0] - a[:, 1] - med) < 1.0], g[np.abs(g[:, 0] - g[:, 1] - med) < 1.0]
+    o = np.r_[a[:, 0] - a[:, 1], g[:, 0] - g[:, 1]]; late = np.r_[a[:, 0], g[:, 0]] > min(a[0, 0], g[0, 0]) + 4.0
+    off = np.percentile(o[late] if late.sum() > 200 else o, 1)  # 수신 − 장치 시각의 아래쪽 끝(전송 지연이 가장 짧은 표본), 시작 4 s는 D455 장치 시각이 흔들려 제외
     t0, t1 = max(a[0, 1], g[0, 1]), min(a[-1, 1], g[-1, 1])
     td = np.arange(t0, t1, 1.0 / fs)
     acc = np.column_stack([np.interp(td, a[:, 1], a[:, k]) for k in (2, 3, 4)])
