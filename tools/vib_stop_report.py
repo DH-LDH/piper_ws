@@ -121,6 +121,8 @@ def analyze(path, a, kin_tb):
         v = signal.savgol_filter(q, 11, 2, deriv=1, delta=1 / FS)  # 엔코더 속도[deg/s] — 속도 피드백은 잡음(0.1 rad/s)이 커서 위치 미분
         pre = (tu > t_cmd - 0.5) & (tu < t_cmd + 0.1); v_run = float(v[pre][np.argmax(np.abs(v[pre]))]) if pre.sum() > 5 else 0.0  # 정지 직전 실제로 도달한 최고 속도
         thr = max(0.05 * abs(v_run), a.v_thr); n = int(0.1 * FS); below = np.abs(v) < thr; i0 = int(np.searchsorted(tu, t_cmd - 0.05)); t_enc = t_cmd + 0.1 if name == "tap" else None
+        if a.first:
+            n = 1  # 문턱 아래로 처음 내려간 시각(되돌림 무시)
         for i in range(i0, len(tu) - n if t_enc is None else 0):
             if below[i:i + n].all():
                 t_enc = tu[i]; break
@@ -179,6 +181,7 @@ def main():
     ap.add_argument("--axis", default="auto", help="자이로 주축 x/y/z 또는 auto")
     ap.add_argument("--floor", type=float, default=0.0, help="잡음 바닥 포락선[rad/s] (B-3 값) — 0이면 기록 안 정지 구간")
     ap.add_argument("--imu-lag", type=float, default=0.0, help="IMU가 엔코더보다 늦는 시간[ms] (B-5 값)")
+    ap.add_argument("--first", action="store_true", help="엔코더 정지 = 속도가 문턱 아래로 처음 내려간 시각(기본은 0.1 s 이어진 첫 시각)")
     ap.add_argument("--all", action="store_true", help="왕복의 돌아간 쪽 정지(bhold)도 분석")
     ap.add_argument("--out", default="", help="결과 CSV")
     ap.add_argument("--plot", default="", help="현상 그림 PNG(첫 기록의 첫 정지)")
