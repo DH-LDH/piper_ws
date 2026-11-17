@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """시행 목록 실행기(단계 C·D) — 조건을 섞은 순서 목록을 만들고 vib_probe --stage ramp를 차례로 돌린다. 기본은 dry-run.
 
-make: 속도 × 거리 × 방향 조건을 반복 수만큼, 반복(블록)마다 순서를 섞어 목록 CSV로(한 블록 안에 조건이 한 번씩 — 온도·처짐 변화가 조건에 몰리지 않게).
+make: 속도 × 거리 × 방향(× 성형 --shapes, 왕복 --round) 조건을 반복 수만큼, 반복(블록)마다 순서를 섞어 목록 CSV로(한 블록 안에 조건이 한 번씩 — 온도·처짐 변화가 조건에 몰리지 않게).
 run : 목록에서 아직 안 한 시행을 순서대로 실행하고 시행마다 결과·기록 파일·펌웨어·SDK·시행 직전 기울기를 목록에 적는다. 정상 종료가 아니면 거기서 멈춘다.
       다시 실행하면 남은 시행부터 이어서 한다. 중단된 시행은 status를 지우면 다시 한다.
 사용: python3 tools/vib_trials.py make docs/data/trials_c1.csv --joint 2 --speeds 5 10 20 --dists 2.5 5 10 --reps 5
+      python3 tools/vib_trials.py make docs/data/trials_d1a.csv --joint 2 --speeds 10 --dists 10 --dirs - --shapes none zv zvd --round --reps 5   (D-1 위치 모드 묶음)
       python3 tools/vib_trials.py run docs/data/trials_c1.csv --imu [--go] [--n 18] [--pause]      (--fake: 가짜 팔)
 """
 import argparse
@@ -18,7 +19,8 @@ import time
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 POSE_A = [-0.3, 121.1, -73.2, 1.6, 52.0, 13.7]  # VIB_E1 자세 A — 멈추는 자세
-COLS = ["idx", "block", "cond", "joint", "speed", "dist", "load_kg", "pose", "tol", "status", "time", "file", "fw", "sdk", "tilt_deg", "result"]
+COLS0 = ["idx", "block", "cond", "joint", "speed", "dist", "load_kg", "pose", "tol", "status", "time", "file", "fw", "sdk", "tilt_deg", "result"]  # C-1 목록 형식
+COLS = COLS0[:7] + ["shape", "shape_f", "shape_zeta", "round_reps"] + COLS0[7:]  # 성형·왕복 열(round_reps 0 = 편도) — 없는 옛 목록은 none·편도로 읽음
 
 
 def read(path):
@@ -29,20 +31,26 @@ def read(path):
 def write(path, rows):
     tmp = path + ".tmp"
     with open(tmp, "w", newline="") as f:
-        w = csv.DictWriter(f, COLS); w.writeheader(); w.writerows(rows)
+        w = csv.DictWriter(f, COLS if rows and "shape" in rows[0] else COLS0); w.writeheader(); w.writerows(rows)  # 옛 목록은 옛 형식 그대로
     os.replace(tmp, path)
 
 
 def make(a):
     if os.path.exists(a.plan) and not a.force:
         raise SystemExit(f"★ {a.plan} 이미 있음 — 덮어쓰려면 --force")
-    conds = [(v, d * s) for v in a.speeds for d in a.dists for s in ([1, -1] if a.dirs == "both" else [1] if a.dirs == "+" else [-1])]
+    if a.round and a.dirs == "both":
+        raise SystemExit("★ --round는 한 시행에 양방향이 들어가므로 --dirs + 또는 -로 첫 도착 방향을 정할 것(J2 '-'면 올림 → 유지 → 내림 → 유지)")
+    ext = a.shapes != ["none"] or a.round  # 성형·왕복을 쓰는 목록만 새 열을 둠 — C-1 형식과 조건 이름은 그대로
+    conds = [(v, d * s, sh) for v in a.speeds for d in a.dists for s in ([1, -1] if a.dirs == "both" else [1] if a.dirs == "+" else [-1]) for sh in a.shapes]
     rng = random.Random(a.seed); rows = []
     for b in range(a.reps):
         order = conds[:]; rng.shuffle(order)
-        for v, d in order:
-            rows.append(dict(idx=len(rows) + 1, block=b + 1, cond=f"J{a.joint}_v{v:g}_d{d:+g}", joint=a.joint, speed=f"{v:g}", dist=f"{d:+g}", load_kg=f"{a.load:g}",
+        for v, d, sh in order:
+            rows.append(dict(idx=len(rows) + 1, block=b + 1, cond=f"J{a.joint}_v{v:g}_d{d:+g}" + (f"_{sh}" if a.shapes != ["none"] else "") + (f"_r{a.round_reps}" if a.round else ""),
+                             joint=a.joint, speed=f"{v:g}", dist=f"{d:+g}", load_kg=f"{a.load:g}",
                              pose=" ".join(f"{x:g}" for x in a.pose), tol=f"{a.tol:g}", status="", time="", file="", fw="", sdk="", tilt_deg="", result=""))
+            if ext:
+                rows[-1].update(shape=sh, shape_f=f"{a.shape_f:g}", shape_zeta=f"{a.shape_zeta:g}", round_reps=str(a.round_reps if a.round else 0))
     os.makedirs(os.path.dirname(os.path.abspath(a.plan)), exist_ok=True); write(a.plan, rows)
     print(f"목록 {a.plan}: 조건 {len(conds)}개 × {a.reps}회 = {len(rows)}시행 (seed {a.seed})")
     print("  처음 6개: " + ", ".join(r["cond"] for r in rows[:6]))
@@ -72,6 +80,10 @@ def run(a):
         cmd = [sys.executable, os.path.join(TOOLS, "vib_probe.py"), "--stage", "ramp", "--joint", r["joint"], "--speed", r["speed"], "--dist=" + r["dist"],
                "--hold", str(a.hold), "--pre-hold", str(a.pre_hold), "--pre-vmax", str(a.pre_vmax), "--spd", str(a.spd), "--can", a.can,
                "--note", f"{name}_{int(r['idx']):03d}", "--expect", *r["pose"].split(), "--expect-tol", r["tol"]]
+        if r.get("shape", "none") not in ("", "none"):
+            cmd += ["--shape", r["shape"], "--shape-f", r["shape_f"], "--shape-zeta", r["shape_zeta"]]
+        if int(r.get("round_reps") or 0) > 0:
+            cmd += ["--round", "--reps", r["round_reps"]]
         cmd += [f for f, on in (("--imu", a.imu), ("--imu2", a.imu2), ("--fake", a.fake), ("--go", a.go)) if on]
         if a.pause and a.go:
             input(f"[{r['idx']}/{len(rows)}] {r['cond']} — Enter로 시작(Ctrl-C로 끝)")
@@ -80,7 +92,7 @@ def run(a):
         res = next((ln[4:] for ln in txt.splitlines() if ln.startswith("결과: ")), txt.strip().splitlines()[-1] if txt.strip() else "출력 없음")
         path = next((ln[4:] for ln in txt.splitlines() if ln.startswith("기록: ")), "")
         if not a.go:
-            print("\n".join("   " + ln for ln in txt.splitlines() if "등속 후 정지" in ln or "끝단 이동" in ln or ln.startswith(("결과", "★")))); continue
+            print("\n".join("   " + ln for ln in txt.splitlines() if "등속 후 정지" in ln or "끝단 이동" in ln or "성형" in ln or "명령이" in ln or ln.startswith(("결과", "★")))); continue
         meta = {}
         if path and os.path.exists(path.replace(".csv", ".meta.json")):
             meta = json.load(open(path.replace(".csv", ".meta.json")))
@@ -105,6 +117,10 @@ def main():
     m.add_argument("--dists", type=float, nargs="+", default=[2.5, 5, 10], help="이동 거리[deg]")
     m.add_argument("--dirs", choices=["both", "+", "-"], default="both", help="도착 방향(+면 관절각이 커지며 도착 — J2는 내림)")
     m.add_argument("--reps", type=int, default=5)
+    m.add_argument("--shapes", choices=["none", "zv", "zvd"], nargs="+", default=["none"], help="입력 성형 조건(vib_probe --shape) — 조건마다 한 번씩 섞임")
+    m.add_argument("--shape-f", type=float, default=7.0); m.add_argument("--shape-zeta", type=float, default=0.10)
+    m.add_argument("--round", action="store_true", help="한 시행 = 왕복(도착 → 유지 → 출발점 → 유지)을 --round-reps회 — 단계 D 시나리오")
+    m.add_argument("--round-reps", type=int, default=6)
     m.add_argument("--load", type=float, default=0.0, help="부하[kg] — 기록용")
     m.add_argument("--pose", type=float, nargs=6, default=POSE_A, help="멈추는 자세[deg]")
     m.add_argument("--tol", type=float, default=1.0, help="멈추는 자세 허용 오차[deg]")

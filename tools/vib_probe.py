@@ -6,6 +6,7 @@ stage step: --joint에 --step° 계단 → 절반 지나 원위치 (조건 a 가
 stage slow: --joints 사인파 저속 추종 (조건 a′, E5 느린 사인파 ±5° 0.25 Hz와 같은 궤적)
 stage goto: --target 관절각까지 코사인 속도 프로파일로 이동(최고 --vmax °/s) — 자세 B 이동용
 stage ramp: 지금 자세(멈추는 자세)에서 --joint를 −dist만큼 천천히 뺀 뒤 --speed °/s 등속으로 돌아와 정지, --hold s 유지 (단계 C·D)
+            --round는 왕복(도착 → 유지 → 출발점 → 유지), --shape zv|zvd는 등속 구간 기준 궤적에 입력 성형(위치 모드 베이스라인, 9절 11/17)
 기록 200 Hz(q, q̇, effort, SDK 수신 시각), JointCtrl 송신 100 Hz, --imu면 손목 D455 IMU, --imu2면 3DM-GQ7 동시 기록.
 기록 옆에 .meta.json(인자, 펌웨어, SDK, 시작 자세)을 남긴다.
 정상 종료는 위치 모드 유지(다음 시행 바로 가능), 이상 시 MotionCtrl_1(0x01)(천천히 내려앉음).
@@ -31,6 +32,15 @@ AMP_MAX_DEG = 10.0
 GOTO_MAX_DEG = 40.0       # goto 한 번에 관절당 최대 변화
 RAMP_MAX_DEG = 15.0       # ramp 이동 거리 상한
 RAMP_VMAX = 20.0          # ramp 등속 상한[deg/s] — 기존 실기 최고는 사인 0.5 Hz의 15.7
+SHAPE_REF = {"zv": ((0.578, 0.422), (0.0, 0.072)), "zvd": ((0.334, 0.488, 0.178), (0.0, 0.072, 0.144))}  # 9절 11/17 회신 4번 값(7.0 Hz, ζ 0.10)
+
+
+def shaper(kind, f, zeta):  # 입력 성형기 임펄스열 [(크기, 시각 s)] — K = exp(−ζπ/√(1−ζ²)), 간격은 감쇠 주기의 절반
+    if kind == "none":
+        return [(1.0, 0.0)]
+    r = math.sqrt(1 - zeta * zeta); K = math.exp(-zeta * math.pi / r); half = 0.5 / (f * r)
+    amp = [1.0, K] if kind == "zv" else [1.0, 2 * K, K * K]
+    return [(x / sum(amp), i * half) for i, x in enumerate(amp)]
 
 
 def stamps(p):  # SDK가 관절·고속 피드백을 받은 시각 — 200 Hz 로그의 중복 행 구분용
@@ -78,7 +88,9 @@ class Vib:
         os.makedirs(LOG_ROOT, exist_ok=True)
         tag = time.strftime("%Y%m%d_%H%M%S") + f"_{a.stage}" + (f"_j{a.joint}" if a.stage == "step" else "") \
             + (f"_j{''.join(map(str, a.joints))}" if a.stage == "slow" else "") \
-            + (f"_j{a.joint}_v{a.speed:g}_d{a.dist:+g}" if a.stage == "ramp" else "") + (f"_{a.note}" if a.note else "") \
+            + (f"_j{a.joint}_v{a.speed:g}_d{a.dist:+g}" if a.stage == "ramp" else "") \
+            + (f"_{a.shape}" if a.stage == "ramp" and a.shape != "none" else "") + (f"_r{a.reps}" if a.stage == "ramp" and a.round else "") \
+            + (f"_{a.note}" if a.note else "") \
             + ("_fake" if a.fake else "") + ("" if a.go else "_dry")
         self.path = os.path.join(LOG_ROOT, tag + ".csv")
         self.f = open(self.path, "w", newline="")
@@ -106,6 +118,7 @@ class Vib:
             self.dump = subprocess.Popen(["candump", "-L", a.can], stdout=open(self.path.replace(".csv", ".candump"), "w"),
                                          stderr=subprocess.DEVNULL)
         self.fast_n = 0; self.segs = []
+        self.imp = shaper(a.shape, a.shape_f, a.shape_zeta) if a.stage == "ramp" else [(1.0, 0.0)]
 
     def meta(self, **kw):  # 기록마다 조건·버전을 남김(FW191_PLAN 0절)
         a = self.a
@@ -116,14 +129,14 @@ class Vib:
         with open(self.path.replace(".csv", ".meta.json"), "w") as f:
             json.dump(m, f, ensure_ascii=False, indent=1)
 
-    def ramp_plan(self, q0):  # [(이름, 시간, 시작각, 끝각, 모양)] — 관절 a.joint만, 각도 rad
+    def ramp_plan(self, q0):  # [(이름, 시간, 시작각, 끝각, 모양, 등속 시간)] — 관절 a.joint만, 각도 rad
         a = self.a; j = a.joint - 1; A = q0[j]; S = A - math.radians(a.dist); d = abs(a.dist)
-        Tc = max(0.5, math.pi / 2 * d / a.pre_vmax); Tl = d / a.speed
+        Tc = max(0.5, math.pi / 2 * d / a.pre_vmax); Tl = d / a.speed; D = self.imp[-1][1]  # 성형하면 등속 구간이 D만큼 길어지고, 유지(hold)는 성형된 기준이 멈춘 뒤 시작
         segs = [("lead", a.lead, A, A, "hold"), ("pre", Tc, A, S, "cos"), ("wait", a.pre_hold, S, S, "hold")]
         for r in range(a.reps):
-            segs += [("ramp", Tl, S, A, "lin"), ("hold", a.hold, A, A, "hold")]
+            segs += [("ramp", Tl + D, S, A, "lin", Tl), ("hold", a.hold, A, A, "hold")]
             if a.round:
-                segs += [("back", Tl, A, S, "lin"), ("bhold", a.hold, S, S, "hold")]
+                segs += [("back", Tl + D, A, S, "lin", Tl), ("bhold", a.hold, S, S, "hold")]
             elif r < a.reps - 1:
                 segs += [("pre", Tc, A, S, "cos"), ("wait", a.pre_hold, S, S, "hold")]
         if a.round:
@@ -131,11 +144,15 @@ class Vib:
         return segs
 
     def ramp_at(self, tt):  # → (구간 이름, 관절각, 관절 속도)
-        for name, T, qa, qb, kind in self.segs:
+        for name, T, qa, qb, kind, *x in self.segs:
             if tt < T:
                 u = tt / T if T > 0 else 1.0
-                if kind == "lin":
-                    return name, qa + (qb - qa) * u, (qb - qa) / T
+                if kind == "lin":  # 등속 기준을 임펄스열과 합성 — 성형 없으면 임펄스 하나(1, 0)라 원래 식과 같음
+                    q = qa; v = 0.0; Tl = x[0]
+                    for ai, ti in self.imp:
+                        q += ai * (qb - qa) * min(1.0, max(0.0, (tt - ti) / Tl))
+                        v += ai * (qb - qa) / Tl if 0.0 <= tt - ti < Tl else 0.0
+                    return name, q, v
                 if kind == "cos":
                     return name, qa + (qb - qa) * (1 - math.cos(math.pi * u)) / 2, (qb - qa) * math.pi / (2 * T) * math.sin(math.pi * u)
                 return name, qa, 0.0
@@ -223,6 +240,15 @@ class Vib:
             print(f"J{j} 등속 후 정지: 멈추는 각 {A:.2f}°, 출발 각 {A - a.dist:.2f}°, {a.speed:g}°/s × {abs(a.dist):g}° ({abs(a.dist) / a.speed:.2f} s), "
                   f"정지 후 {a.hold:g} s, {a.reps}회{' 왕복' if a.round else ''} → 총 {self.duration():.1f} s")
             print("  구간: " + " → ".join(f"{n} {T:.1f}s" for n, T, *_ in self.segs))
+            if a.shape != "none":
+                D = self.imp[-1][1]; Tl = abs(a.dist) / a.speed; ref = SHAPE_REF[a.shape]
+                same = a.shape_f == 7.0 and a.shape_zeta == 0.10 and all(abs(x - y) < 1e-3 for x, y in zip([i[0] for i in self.imp] + [i[1] for i in self.imp], ref[0] + ref[1]))
+                ed = sorted({0.0, Tl + D} | {ti for _, ti in self.imp} | {ti + Tl for _, ti in self.imp})  # 명령 속도가 바뀌는 시각
+                lv = [a.speed * sum(ai for ai, ti in self.imp if ti <= (t1 + t2) / 2 < ti + Tl) for t1, t2 in zip(ed, ed[1:])]
+                print(f"  성형 {a.shape.upper()} ({a.shape_f:g} Hz, ζ {a.shape_zeta:g}): 임펄스 " + ", ".join(f"{ai:.3f} @ {ti * 1000:.0f} ms" for ai, ti in self.imp)
+                      + (" — 9절 11/17 값과 같음" if same else "") + f"\n  명령이 {D * 1000:.0f} ms 길어짐(등속 구간 {Tl:.2f} → {Tl + D:.2f} s), 명령 속도 "
+                      + " → ".join(f"{v:.1f}" for v in lv) + " °/s" + (" ★ 이동 시간이 성형기 길이보다 짧아 명령 속도가 등속에 못 미침" if Tl < D else ""))
+                self.meta(shape=dict(kind=a.shape, f=a.shape_f, zeta=a.shape_zeta, impulses=[[round(ai, 4), round(ti, 4)] for ai, ti in self.imp], extra_s=round(D, 4)))
             try:  # 끝단 이동 거리와 올림·내림(FK) — 표에 적을 값, 실패해도 시행에는 영향 없음
                 sys.path.insert(0, os.path.join(TOOLS, "..", "src", "common_pkg"))
                 from piper_kin import PiperKin
@@ -313,6 +339,9 @@ def main():
     ap.add_argument("--hold", type=float, default=3.0, help="ramp 정지 후 유지[s]")
     ap.add_argument("--reps", type=int, default=1, help="ramp 반복 수")
     ap.add_argument("--round", action="store_true", help="ramp 왕복: 도착 → 유지 → 같은 속도로 출발점 → 유지 (단계 D 시나리오)")
+    ap.add_argument("--shape", choices=["none", "zv", "zvd"], default="none", help="ramp 등속 구간(왕복이면 돌아가는 구간도) 기준 궤적에 입력 성형 — 예비 동작은 그대로")
+    ap.add_argument("--shape-f", type=float, default=7.0, help="성형 대상 고유 진동수[Hz] (자세 A 약 7 Hz)")
+    ap.add_argument("--shape-zeta", type=float, default=0.10, help="성형 대상 감쇠비")
     ap.add_argument("--pre-vmax", type=float, default=5.0, help="ramp 출발점까지 빼는 최고 속도[deg/s] (코사인)")
     ap.add_argument("--pre-hold", type=float, default=3.0, help="ramp 출발점에서 기다리는 시간[s]")
     ap.add_argument("--expect", type=float, nargs=6, default=None, help="기대 시작 자세[deg] — 벗어나면 시작하지 않음")
@@ -339,6 +368,8 @@ def main():
         raise SystemExit(f"계단은 {STEP_MAX_DEG}°, 진폭은 {AMP_MAX_DEG}° 이하로")
     if a.stage == "ramp" and not (0 < abs(a.dist) <= RAMP_MAX_DEG and 0 < a.speed <= RAMP_VMAX and 0 < a.pre_vmax <= 10 and a.reps >= 1):
         raise SystemExit(f"ramp는 거리 {RAMP_MAX_DEG}° 이하, 속도 {RAMP_VMAX}°/s 이하, --pre-vmax 10°/s 이하")
+    if a.shape != "none" and (a.stage != "ramp" or not 3.0 <= a.shape_f <= 15.0 or not 0.0 <= a.shape_zeta <= 0.5):
+        raise SystemExit("--shape는 --stage ramp에서만, --shape-f 3–15 Hz, --shape-zeta 0–0.5")
     a.fw, a.sdk = "fake", "fake"
     if a.fake:
         p = fake_follow(make_fake())
