@@ -102,16 +102,21 @@ class Probe:
         self.fast_n = 0
         self.spike_n = 0; self.spikes = 0
         self.tdc = None
-        if a.tdc:  # 한 축 TDC(TDE + 극점 배치) — 체크리스트 2단계, 시험 관절은 펌웨어 Kp·Kd 0, 토크는 전부 우리 계산
-            if not a.hybrid:  # 하이브리드는 시험 관절도 펌웨어 MIT PD 유지
-                self.kp[a.joint - 1] = 0.0; self.kd[a.joint - 1] = 0.0  # 나머지 관절은 --ext 없으면 펌웨어 PD로 고정(10-20 손목 튐 대비)
+        self.tj = [j - 1 for j in (a.tdc_joints or [a.joint])] if a.tdc else []  # 추종층(TDC) 관절 — --tdc-joints 없으면 --joint 하나
+        self.mb = dict(zip(self.tj, a.mbars or [a.mbar] * len(self.tj)))  # 관절별 M̄
+        self.tws = {}; self.tdc_files = []
+        for j in self.tj:  # 시험 관절은 펌웨어 Kp·Kd 0(하이브리드면 유지), 토크는 우리 계산 — 기록은 --joint가 .tdc.csv, 나머지는 .tdcN.csv
+            if not a.hybrid:
+                self.kp[j] = 0.0; self.kd[j] = 0.0  # 나머지 관절은 --ext 없으면 펌웨어 PD로 고정(10-20 손목 튐 대비)
             if self.ext_kp is not None:
-                self.ext_kp[a.joint - 1] = 0.0
+                self.ext_kp[j] = 0.0
             if self.ext_kd is not None:
-                self.ext_kd[a.joint - 1] = 0.0
-            self.tdc = open(self.path.replace(".csv", ".tdc.csv"), "w", newline="")
-            self.tw = csv.writer(self.tdc)
-            self.tw.writerow(["t", "e", "ed", "qdd_f", "ar", "tau_prev", "tde", "pd", "sw", "tau", "K", "eta"])
+                self.ext_kd[j] = 0.0
+            f = open(self.path.replace(".csv", ".tdc.csv" if j == a.joint - 1 else f".tdc{j + 1}.csv"), "w", newline="")
+            self.tdc_files.append(f); self.tws[j] = csv.writer(f)
+            self.tws[j].writerow(["t", "e", "ed", "qdd_f", "ar", "tau_prev", "tde", "pd", "sw", "tau", "K", "eta"])
+            if j == a.joint - 1:
+                self.tdc = f
 
     vib_now = {"v": 0.0}
 
@@ -190,6 +195,8 @@ class Probe:
                     if a.asmc else "")
                  + (f" | ASMC-2016 φ {a.phi}, α {a.alpha}, ε {a.eps}, K̂ 상한 {a.k_max} (M̄K̂ {a.mbar * a.k_max:.3f} N·m), "
                     + (f"sat φ {a.sw_phi}" if a.sw_phi else "sgn") if a.asmc16 else "") if a.tdc else ""))
+        if len(self.tj) > 1:
+            print("추종층 관절: " + ", ".join(f"J{j + 1} M̄ {self.mb[j]}" for j in self.tj) + " (나머지 설정은 공통, 처프·τ_vib 경로는 --joint만)")
         if not a.go:
             print(f"[dry-run] MIT 전환 시 보낼 첫 프레임 (관절, q_ref[rad], q̇_ref, Kp, Kd, τ_ff):")
             for j in range(6):
@@ -234,15 +241,16 @@ class Probe:
         j6 = a.joint - 1
         reason = None
         t_prev = None
-        ctrl = None
+        ctrls = {}
         chirp_now = {"v": 0.0}  # 이번 주기 처프 토크 — TDC 관절이면 dist_comp(τ_vib와 같은 경로), 아니면 τ_ff에 직접
         if self.tdc is not None:
             sw = "asmc16" if a.asmc16 else "asmc" if a.asmc else "fixed" if a.sw_k else "none"
-            ctrl = JointCtrl(JointCtrlCfg(mbar=a.mbar, ks=a.ks, kg=a.kg, acc_fc=a.acc_fc, hybrid=a.hybrid,
-                                          kp_fw=self.kp[j6], kd_fw=self.kd[j6], switch=sw, sw_k=a.sw_k, sw_phi=a.sw_phi,
-                                          k_max=a.k_max, eps=a.eps, phi=a.phi, alpha=a.alpha, delta=a.delta, gamma=a.gamma,
-                                          a_exp=a.a_exp, eta_lo=a.eta_lo, eta_hi=a.eta_hi, mu=a.mu, dist_mode=a.dist_mode), tff[j6],
-                             dist_comp=(lambda o: dist_now["v"]) if a.joint in (a.chirp_joint, a.vib_joint) else None)
+            for j in self.tj:
+                ctrls[j] = JointCtrl(JointCtrlCfg(mbar=self.mb[j], ks=a.ks, kg=a.kg, acc_fc=a.acc_fc, hybrid=a.hybrid,
+                                                  kp_fw=self.kp[j], kd_fw=self.kd[j], switch=sw, sw_k=a.sw_k, sw_phi=a.sw_phi,
+                                                  k_max=a.k_max, eps=a.eps, phi=a.phi, alpha=a.alpha, delta=a.delta, gamma=a.gamma,
+                                                  a_exp=a.a_exp, eta_lo=a.eta_lo, eta_hi=a.eta_hi, mu=a.mu, dist_mode=a.dist_mode), tff[j],
+                                     dist_comp=(lambda o: dist_now["v"]) if j == j6 and a.joint in (a.chirp_joint, a.vib_joint) else None)
         same = bool(a.chirp_joint and a.chirp_joint == a.vib_joint)  # 처프 + τ_vib 같은 관절: 합에 포화(8절 10/26 밤 2)
         dist_now = {"v": 0.0}; self.n_sat = 0; k_switched = False
         vd = None; tds = []
@@ -265,14 +273,14 @@ class Probe:
             now = time.time(); tt = now - t_start
             if tt > dur:
                 break
-            qr = q_hold.copy(); vr = np.zeros(6); ar = 0.0
+            qr = q_hold.copy(); vr = np.zeros(6); arv = np.zeros(6)  # 기준 위치·속도·가속도(관절별)
             if a.stage == "sine" and hold_s < tt <= hold_s + a.cycles / a.hz:  # 진폭을 2 s 동안 0→A로 올림(급출발 방지), --sine-joints면 여러 관절 같은 위상(a′) — 주기 끝나면 꼬리 2 s는 유지 자세(10-27까지는 꼬리에도 사인이 이어졌음, E4 16절)
                 ts = tt - hold_s; ramp = min(1.0, ts / 2.0)
                 w = 2 * math.pi * a.hz; A = math.radians(a.amp) * ramp
                 for jj in ([j - 1 for j in a.sine_joints] if a.sine_joints else [j6]):
                     qr[jj] = q_hold[jj] + A * math.sin(w * ts)
                     vr[jj] = A * w * math.cos(w * ts)
-                ar = -A * w * w * math.sin(w * ts) if (not a.sine_joints or a.joint in a.sine_joints) else 0.0
+                    arv[jj] = -A * w * w * math.sin(w * ts)
             pi = None
             if plan is not None:
                 pi = plan.at(tt)
@@ -286,7 +294,7 @@ class Probe:
                     env, denv, wt = pi["sine"]; w = 2 * math.pi * a.hz; A = math.radians(a.amp)
                     for jj in [j - 1 for j in a.sine_joints]:
                         qr[jj] = q_hold[jj] + A * env * math.sin(wt); vr[jj] = A * (env * w * math.cos(wt) + denv * math.sin(wt))
-                    ar = -A * env * w * w * math.sin(wt) if a.joint in a.sine_joints else 0.0
+                        arv[jj] = -A * env * w * w * math.sin(wt)
                 if pi["kind"] == "onoff" and plan.lead_ok is not None:
                     vd.c.lead_deg = plan.lead_ok
                 if pi["kind"] == "ck" and plan.lead is not None:
@@ -316,8 +324,10 @@ class Probe:
             if self.tdc is not None:  # τ = τ(t−L) − M̄·q̈(t−L) + M̄(q̈_d + (Ks+Kg)ė + Ks·Kg·e) + 스위칭 — src/common_pkg/joint_ctrl.py
                 h = max(now - t_prev, 1e-3) if t_prev is not None else 0.0
                 t_prev = now
-                co = ctrl.step(s[0][j6], s[1][j6], qr[j6], vr[j6], ar, h)
-                tau[j6] = co["tau"]
+                cos = {}
+                for j in self.tj:
+                    cos[j] = ctrls[j].step(s[0][j], s[1][j], qr[j], vr[j], arv[j], h)
+                    tau[j] = cos[j]["tau"]
             if same and (a.chirp_joint != a.joint or self.tdc is None):
                 tau[a.chirp_joint - 1] += dist_now["v"]
             elif not same:
@@ -330,11 +340,12 @@ class Probe:
                     tj = tau[a.vib_joint - 1]; tv = self.vib_now["v"]
                     vd.note_sum_sat((same and sum_sat) or (abs(tj) >= TAU_CMD_LIMIT and abs(tj - tv) < TAU_CMD_LIMIT))
                 tau = np.clip(tau, -TAU_CMD_LIMIT, TAU_CMD_LIMIT)
-            if self.tdc is not None:
-                self.tw.writerow([f"{now - self.t0:.4f}", f"{co['e']:.6f}", f"{co['ed']:.5f}", f"{co['qdd_f']:.4f}", f"{ar:.5f}",
-                                  f"{co['tau_prev']:.4f}", f"{co['tde']:.4f}", f"{co['pd']:.4f}", f"{co['sw']:.4f}", f"{tau[j6]:.4f}",
-                                  f"{co['K']:.3f}", f"{co['eta']:.2f}"])
-                ctrl.commit(tau[j6])  # 포화 후 값 — 실제 보낸 토크로 다음 TDE
+            for j in self.tj:
+                co = cos[j]
+                self.tws[j].writerow([f"{now - self.t0:.4f}", f"{co['e']:.6f}", f"{co['ed']:.5f}", f"{co['qdd_f']:.4f}", f"{arv[j]:.5f}",
+                                      f"{co['tau_prev']:.4f}", f"{co['tde']:.4f}", f"{co['pd']:.4f}", f"{co['sw']:.4f}", f"{tau[j]:.4f}",
+                                      f"{co['K']:.3f}", f"{co['eta']:.2f}"])
+                ctrls[j].commit(tau[j])  # 포화 후 값 — 실제 보낸 토크로 다음 TDE
             for j in range(6):
                 p.JointMitCtrl(j + 1, float(qr[j]), float(vr[j]), float(self.kp[j]), float(self.kd[j]), float(tau[j]) + TAU_STEP / 2)
             if plan is not None and vo is not None:
@@ -604,6 +615,8 @@ def main():
                     help="펌웨어 Kd=0으로 두고 우리 루프가 τ_ff에 ext_kd·(q̇_ref−q̇)를 더함")
     ap.add_argument("--tdc", action="store_true", help="--joint 한 축을 TDC로(나머지는 --ext-kp/--ext-kd PD)")
     ap.add_argument("--mbar", type=float, default=0.005, help="TDC 관성 추정 M̄[kg·m²] — 작게 시작해서 키움")
+    ap.add_argument("--tdc-joints", type=int, nargs="+", default=None, help="추종층(TDC)을 동시에 걸 관절들(1–3, --joint 포함) — 없으면 --joint 하나")
+    ap.add_argument("--mbars", type=float, nargs="+", default=None, help="--tdc-joints 순서대로 관절별 M̄ — 없으면 모두 --mbar")
     ap.add_argument("--ks", type=float, default=20.0, help="TDC 극점 Ks[1/s]")
     ap.add_argument("--kg", type=float, default=20.0, help="TDC 극점 Kg[1/s]")
     ap.add_argument("--sw-k", type=float, default=0.0, help="TDC 스위칭 게인 K[rad/s²] — 0이면 TDC만, M̄·K가 최대 보정 토크")
@@ -679,6 +692,13 @@ def main():
         if not a.vib_joint or a.vib_joint != a.joint or not a.tdc or a.stage != "hold" or a.vib_k_switch or not a.speed_err or not a.sine_joints:
             raise SystemExit("--plan: --tdc --hybrid --joint J --vib-joint J --stage hold --speed-err --sine-joints … 필요, --vib-k-switch 금지")
         a.chirp_joint = a.vib_joint; a.vib_k = 0.0; a.chirp_start = 0.0; a.chirp_dur = 0.0; a.hold = 0.0  # 처프·k는 계획이
+    if a.tdc_joints:
+        if not a.tdc or not a.hybrid or a.joint not in a.tdc_joints or len(set(a.tdc_joints)) != len(a.tdc_joints) or not set(a.tdc_joints) <= {1, 2, 3}:
+            raise SystemExit("--tdc-joints: --tdc --hybrid 필요, J1–J3만, 중복 없이, --joint를 포함(순수 토크 TDC는 J1·J3 헌팅 — MIT_E4)")
+        if a.mbars and (len(a.mbars) != len(a.tdc_joints) or not all(0 < m <= 0.02 for m in a.mbars)):
+            raise SystemExit("--mbars: --tdc-joints와 같은 개수, 각 0.02 이하")
+    elif a.mbars:
+        raise SystemExit("--mbars는 --tdc-joints와 같이")
     if abs(a.vib_lead_deg) > 180:
         raise SystemExit("φ_lead는 ±180° 안(8절 10/27 오전 4: 상한 없음, 1–5 Hz |L| 확인 조건)")
     if a.vib_joint and ((a.chirp_joint and a.chirp_joint != a.vib_joint) or a.vib_max > 0.5 or a.vib_sum_max > 0.5
@@ -742,8 +762,8 @@ def main():
                 pr.imu.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pr.imu.kill()
-        if pr.tdc:
-            pr.tdc.close()
+        for f in pr.tdc_files:
+            f.close()
     print(f"결과: {res}\n기록: {pr.path}" + (f"\nIMU: {pr.path.replace('.csv', '.imu.csv')}" if pr.imu else "") + (f"\nCAN 원본: {pr.path.replace('.csv', '.candump')}" if pr.dump else ""))
     if getattr(pr, "td_stats", None):
         print(pr.td_stats)
