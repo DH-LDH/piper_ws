@@ -17,7 +17,7 @@ if os.path.isdir(RSUSB):
     sys.path.insert(0, RSUSB)
 import pyrealsense2 as rs
 
-ACCEL_HZ = (250, 63)  # D455 지원 값 중 높은 것부터
+ACCEL_HZ = (250, 63)  # D455 지원 값 중 높은 것부터 — 요청값일 뿐, BMI085 장치는 250을 요청해도 실제 200 Hz(간격 4.96 ms, 11/17 확인)라 끝날 때 잰 값을 표시
 GYRO_HZ = (400, 200)
 
 
@@ -28,15 +28,19 @@ def main():
     a = ap.parse_args()
     if not rs.context().devices:
         raise SystemExit("★ RealSense 장치 없음 — 손목캠 USB 확인, 카메라 노드가 장치를 잡고 있으면 종료")
-    lock = threading.Lock(); rows = []; n = {"a": 0, "g": 0}
+    lock = threading.Lock(); rows = []; n = {"a": 0, "g": 0}; last = {"a": None, "g": None}; gaps = {"a": [], "g": []}  # gaps: 장치 시각 간격[ms], 스트림마다 앞 20000개
 
     def cb(f):  # SDK 스레드 — 버퍼에만 쌓음
         m = f.as_motion_frame()
         if not m:
             return
         d = m.get_motion_data(); k = "a" if m.get_profile().stream_type() == rs.stream.accel else "g"
+        td = m.get_timestamp()
         with lock:
-            rows.append((time.time(), m.get_timestamp(), k, d.x, d.y, d.z)); n[k] += 1
+            rows.append((time.time(), td, k, d.x, d.y, d.z)); n[k] += 1
+            if last[k] is not None and len(gaps[k]) < 20000:
+                gaps[k].append(td - last[k])
+            last[k] = td
 
     pipe = None
     for ah in ACCEL_HZ:  # 장치마다 지원 주기가 달라 되는 조합을 찾음
@@ -52,7 +56,7 @@ def main():
             break
     if pipe is None:
         raise SystemExit("★ IMU 스트림 시작 실패")
-    print(f"IMU 기록 시작: 가속도 {ah} Hz, 자이로 {gh} Hz → {a.out}", flush=True)
+    print(f"IMU 기록 시작: 가속도 {ah} Hz, 자이로 {gh} Hz(요청값) → {a.out}", flush=True)
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     f = open(a.out, "w", newline=""); w = csv.writer(f)
@@ -71,7 +75,10 @@ def main():
         with lock:
             w.writerows((f"{t:.6f}", f"{td:.3f}", k, f"{x:.5f}", f"{y:.5f}", f"{z:.5f}") for t, td, k, x, y, z in rows)
         f.close()
-        print(f"IMU 기록 종료: 가속도 {n['a']}개, 자이로 {n['g']}개", flush=True)
+        def rate(k):  # 장치 시각 간격 중앙값으로 잰 실제 표본율 — 시작 직후 시각 기준이 바뀌는 표본(1 s 넘는 간격)은 뺌
+            g = sorted(x for x in gaps[k] if 0 < x < 1000)
+            return f"{g[len(g) // 2]:.2f} ms = {1000 / g[len(g) // 2]:.0f} Hz" if g else "간격 없음"
+        print(f"IMU 기록 종료: 가속도 {n['a']}개(실제 간격 중앙 {rate('a')}), 자이로 {n['g']}개({rate('g')})", flush=True)
         os._exit(0)  # librealsense 종료 정리가 가끔 멈춤(10-23) — 파일은 이미 닫음
 
 

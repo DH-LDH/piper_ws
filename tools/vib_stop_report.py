@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """정지 창 분석(단계 C·D·E) — vib_probe 기록(+ .imu.csv)에서 "엔코더는 멈췄는데 끝단은 흔들린다"를 정지마다 한 줄로.
 
-정지 시점: 명령 정지 t_cmd(ramp→hold 전환, 다른 단계는 qref가 멈춘 때) 뒤, 엔코더 속도(위치 미분, 55 ms 평활)가 문턱 아래로 0.1 s 이어진 첫 시각 t_enc.
+정지 시점: 명령 정지 t_cmd(ramp→hold 전환, 다른 단계는 qref가 멈춘 때) 뒤, 엔코더 속도(위치 미분, 55 ms 평활)가 문턱 아래로 처음 내려간 시각 t_enc(9절 11/17 정의 (나)).
+          --sustained면 문턱 아래로 0.1 s 이어진 첫 시각(11/16 정의 (가) — 멈춘 직후 되돌아가는 시행에서 85 ms쯤 늦게 잡힘, FW191_C_LOG 2.3절).
 창: t_enc부터 --win s. 자이로는 카메라 축, 주축은 창 안 2–20 Hz 에너지가 가장 큰 축(--axis로 고정 가능).
-지표: 첫 봉우리(20 Hz 저역, 창 끝 0.5 s 평균을 뺀 값), 5–10 Hz rms(자이로 주축·3축 크기·각가속도, 가속도 주축·3축 크기),
-      모드 주파수·감쇠비(감쇠 사인 맞춤, 로그 감소율 병기), 정착 시간(2–20 Hz 포락선이 잡음 바닥 2배 아래로 0.3 s 이어지는 첫 시각, 유지 구간 끝까지 봄), 엔코더 몫(같은 창 엔코더 각속도 rms / 끝단).
-잡음 바닥: --floor[rad/s] 없으면 같은 기록의 움직이기 전 정지 구간 포락선 중앙값.
+지표: 창 최대(진폭 지표, 20 Hz 저역·창 끝 0.5 s 평균을 뺀 값. 첫 봉우리는 참고), 5–10 Hz rms(자이로 주축·3축 크기·각가속도, 가속도 주축·3축 크기),
+      모드 주파수·감쇠비(감쇠 사인 맞춤, 로그 감소율 병기 — 통계는 R² 0.8 이상 시행만), 정착 시간(2–20 Hz 포락선이 잡음 바닥 2배 아래로 0.3 s 이어지는 첫 시각, 유지 구간 끝까지 봄),
+      명령 정지부터 정착까지(settle_cmd_s = 정지 지연 + 정착 시간), 엔코더 몫(같은 창 엔코더 각속도 rms / 끝단), 명령 이동 시간(t_move_s = 거리 / 속도).
+잡음 바닥: --floor[rad/s] 값 하나로 고정(기본 0.0099 = C-1 90시행 기록별 바닥의 중앙값, 카메라 자리 자이로). --floor 0이면 같은 기록의 움직이기 전 정지 구간 포락선 중앙값(floor_own_rads 열에는 항상 적음).
 사용: python3 tools/vib_stop_report.py logs/vib/*_ramp_*.csv [--out stops.csv] [--plot docs/img/p_x.png] [--all]
 """
 import argparse
@@ -22,9 +24,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from vib_analyze import decay  # noqa: E402
 
 FS = 200.0
-COLS = ["file", "fw", "sdk", "joint", "speed_dps", "dist_deg", "stop", "tilt_deg", "v_enc_dps", "t_stop_ms", "axis", "peak1_rads", "t_peak1_ms", "max_rads",
+COLS = ["file", "fw", "sdk", "joint", "speed_dps", "dist_deg", "t_move_s", "stop", "tilt_deg", "v_enc_dps", "t_stop_ms", "axis", "peak1_rads", "t_peak1_ms", "max_rads",
         "gyro_rms", "gyro_vec_rms", "angacc_rms", "acc_axis", "acc_rms", "acc_vec_rms", "f_fit", "zeta_fit", "r2", "f_fft", "zeta_log", "n_cyc",
-        "settle_s", "floor_rads", "enc_rms", "enc_share"]
+        "settle_s", "settle_cmd_s", "floor_rads", "floor_own_rads", "enc_rms", "enc_share"]
 
 
 def load_imu(path, t0, lag=0.0):  # → {"a": (t, xyz), "g": (t, xyz)} — 장치 시각 + 수신 시각 최소 지연으로 기록 시각 축에
@@ -121,8 +123,10 @@ def analyze(path, a, kin_tb):
         v = signal.savgol_filter(q, 11, 2, deriv=1, delta=1 / FS)  # 엔코더 속도[deg/s] — 속도 피드백은 잡음(0.1 rad/s)이 커서 위치 미분
         pre = (tu > t_cmd - 0.5) & (tu < t_cmd + 0.1); v_run = float(v[pre][np.argmax(np.abs(v[pre]))]) if pre.sum() > 5 else 0.0  # 정지 직전 실제로 도달한 최고 속도
         thr = max(0.05 * abs(v_run), a.v_thr); n = int(0.1 * FS); below = np.abs(v) < thr; i0 = int(np.searchsorted(tu, t_cmd - 0.05)); t_enc = t_cmd + 0.1 if name == "tap" else None
-        if a.first:
-            n = 1  # 문턱 아래로 처음 내려간 시각(되돌림 무시)
+        if not a.sustained and t_enc is None:  # 정의 (나): 문턱 아래로 처음 내려간 시각 — 아직 안 움직인 상태면(계단 기록) 움직이기 시작한 뒤부터 찾음
+            n = 1
+            while i0 < len(tu) - 1 and below[i0]:
+                i0 += 1
         for i in range(i0, len(tu) - n if t_enc is None else 0):
             if below[i:i + n].all():
                 t_enc = tu[i]; break
@@ -142,12 +146,8 @@ def analyze(path, a, kin_tb):
         zl, ncyc = decay(gb[i1:] * np.sign(gb[i1]), FS, f_fft)
         sb = signal.butter(2, [2, 20], "bandpass", fs=FS, output="sos"); k = int(0.25 * FS)
         envf = lambda x: np.convolve(np.abs(signal.hilbert(signal.sosfiltfilt(sb, x))), np.ones(k) / k, "same")  # 2–20 Hz 포락선, 0.25 s 평활
-        if a.floor > 0:
-            floor = a.floor
-        elif t_still[1] - t_still[0] > 1.2:  # 같은 기록의 움직이기 전 정지 구간
-            floor = float(np.median(envf(resamp(*imu["g"], *t_still)[1][:, ax])[k:-k]))
-        else:
-            floor = float("nan")
+        floor_own = float(np.median(envf(resamp(*imu["g"], *t_still)[1][:, ax])[k:-k])) if t_still[1] - t_still[0] > 1.2 else float("nan")  # 같은 기록의 움직이기 전 정지 구간
+        floor = a.floor if a.floor > 0 else floor_own
         te, Ge = resamp(*imu["g"], t_enc - 1.0, min(t_lim, imu["g"][0][-1])); env = envf(Ge[:, ax]); m = te >= t_enc; env, te = env[m][:-k], te[m][:-k] - t_enc
         settle = float("nan")
         if np.isfinite(floor) and len(env) > k:  # 포락선이 바닥 2배 아래로 0.3 s 이어지는 첫 시각(유지 구간 끝까지 봄)
@@ -156,14 +156,15 @@ def analyze(path, a, kin_tb):
         E = enc_rate_cam(d, kin_tb, tg)
         e5 = rms(band(E[:, ax], 5, 10)) if E is not None else rms(band(np.radians(signal.savgol_filter(np.interp(tg, t, d[f"q{j}"].values), 11, 2, deriv=1, delta=1 / FS)), 5, 10))
         g5 = rms(band(G[:, ax], 5, 10))
-        row = dict(file=os.path.basename(path), fw=meta.get("fw", ""), sdk=meta.get("sdk", ""), joint=j, speed_dps=args.get("speed", ""), dist_deg=args.get("dist", ""),
+        t_move = round(abs(float(args["dist"])) / float(args["speed"]), 4) if "ramp" in set(d.phase.values) and args.get("speed") else ""  # 명령 이동 시간
+        row = dict(file=os.path.basename(path), fw=meta.get("fw", ""), sdk=meta.get("sdk", ""), joint=j, speed_dps=args.get("speed", ""), dist_deg=args.get("dist", ""), t_move_s=t_move,
                    stop=name, tilt_deg=round(tilt, 2), v_enc_dps=round(v_run, 2), t_stop_ms=round((t_enc - t_cmd) * 1000), axis="xyz"[ax],
                    peak1_rads=round(float(gl[i1]), 4), t_peak1_ms=round(float(tt[i1]) * 1000), max_rads=round(float(np.abs(gl).max()), 4),
                    gyro_rms=round(g5, 5), gyro_vec_rms=round(float(np.sqrt(sum(rms(band(G[:, c], 5, 10)) ** 2 for c in range(3)))), 5),
                    angacc_rms=round(rms(band(G[:, ax], 5, 10, deriv=True)), 4), acc_axis="xyz"[aax], acc_rms=round(rms(band(A[:, aax], 5, 10)), 4),
                    acc_vec_rms=round(float(np.sqrt(sum(rms(band(A[:, c], 5, 10)) ** 2 for c in range(3)))), 4),
                    f_fit=round(ff, 2), zeta_fit=round(zf, 3), r2=round(r2, 2), f_fft=round(f_fft, 2), zeta_log=round(zl, 3), n_cyc=ncyc,
-                   settle_s=round(settle, 2), floor_rads=round(floor, 5), enc_rms=round(e5, 5), enc_share=round(e5 / g5, 3) if g5 > 0 else float("nan"))
+                   settle_s=round(settle, 2), settle_cmd_s=round(settle + (t_enc - t_cmd), 2), floor_rads=round(floor, 5), floor_own_rads=round(floor_own, 5), enc_rms=round(e5, 5), enc_share=round(e5 / g5, 3) if g5 > 0 else float("nan"))
         rows.append(row)
         if fig is None:  # 현상 그림용: 첫 정지의 엔코더 속도와 끝단 각속도
             tp, Gp = resamp(*imu["g"], tu[0], min(tu[-1], imu["g"][0][-1])); gp = signal.sosfiltfilt(sos, Gp[:, ax] - bias)
@@ -173,15 +174,31 @@ def analyze(path, a, kin_tb):
     return rows, fig
 
 
+def summary(rows):  # 조건별 표 — 중앙값(최소–최대), f·ζ는 R² 0.8 이상 시행만(개수 병기)
+    d = pd.DataFrame(rows); d = d[d.speed_dps != ""].copy()
+    if d.empty:
+        return
+    d["d"] = d.dist_deg.astype(float).abs(); d["dir"] = np.where(d.dist_deg.astype(float) > 0, "+", "−"); d["v"] = d.speed_dps.astype(float)
+    mr = lambda x, n: f"{x.median():.{n}f} ({x.min():.{n}f}–{x.max():.{n}f})"
+    print("| 속도 [°/s] | 거리 [°] | 방향 | 정지 | n | 명령 이동 시간 [s] | 도달 속도 [°/s] | 5–10 Hz 자이로 rms [rad/s] | 창 최대 [rad/s] | 가속도 rms [m/s²] | f [Hz] | ζ | R² ≥ 0.8 | 정착 [s] | 명령 정지부터 정착 [s] | 엔코더 몫 |")
+    print("|" + "---|" * 16)
+    for (v, dd, dr, st), m in d.groupby(["v", "d", "dir", "stop"], sort=True):
+        ok = m[m.r2 >= 0.8]; fz = (f"{ok.f_fit.median():.2f} | {ok.zeta_fit.median():.3f}" if len(ok) else "— | —")
+        print(f"| {v:g} | {dd:g} | {dr} | {st} | {len(m)} | {dd / v:.3f} | {m.v_enc_dps.abs().median():.1f} | {mr(m.gyro_rms, 4)} | {mr(m.max_rads, 3)} | {m.acc_rms.median():.3f} | {fz} | {len(ok)}/{len(m)} | "
+              f"{mr(m.settle_s, 2)} | {mr(m.settle_cmd_s, 2)} | {m.enc_share.median():.2f} |")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--win", type=float, default=2.0, help="정지 창 길이[s]")
     ap.add_argument("--v-thr", type=float, default=0.3, help="엔코더 정지 판정 속도 하한[deg/s] (등속의 5%%와 큰 쪽)")
     ap.add_argument("--axis", default="auto", help="자이로 주축 x/y/z 또는 auto")
-    ap.add_argument("--floor", type=float, default=0.0, help="잡음 바닥 포락선[rad/s] (B-3 값) — 0이면 기록 안 정지 구간")
+    ap.add_argument("--floor", type=float, default=0.0099, help="정착 판정 잡음 바닥 포락선[rad/s] — 기본 0.0099(C-1 90시행 중앙값, 9절 11/17), 0이면 기록 안 정지 구간")
     ap.add_argument("--imu-lag", type=float, default=0.0, help="IMU가 엔코더보다 늦는 시간[ms] (B-5 값)")
-    ap.add_argument("--first", action="store_true", help="엔코더 정지 = 속도가 문턱 아래로 처음 내려간 시각(기본은 0.1 s 이어진 첫 시각)")
+    ap.add_argument("--sustained", action="store_true", help="엔코더 정지 = 문턱 아래로 0.1 s 이어진 첫 시각(11/16 정의 (가)) — 기본은 처음 내려간 시각(정의 (나))")
+    ap.add_argument("--first", action="store_true", help="(기본이 됨, 호환용으로 남김)")
+    ap.add_argument("--summary", action="store_true", help="조건(속도·거리·방향)별 중앙값(최소–최대) 표를 마크다운으로")
     ap.add_argument("--all", action="store_true", help="왕복의 돌아간 쪽 정지(bhold)도 분석")
     ap.add_argument("--out", default="", help="결과 CSV")
     ap.add_argument("--plot", default="", help="현상 그림 PNG(첫 기록의 첫 정지)")
@@ -197,11 +214,19 @@ def main():
         if p.endswith((".imu.csv", ".gq7.csv")):
             continue
         r, f = analyze(p, a, kin_tb); rows += r; fig = fig or f
-    print("기록 | 관절 속도 거리 | 기울기 | 도달 속도[°/s] 정지 지연[ms] | 축 첫 봉우리[rad/s]@ms 최대 | 5–10 Hz 자이로·각가속도·가속도 | f[Hz] ζ(R²) | 정착[s] | 엔코더 몫")
+    print("기록 | 관절 속도 거리 | 기울기 | 도달 속도[°/s] 정지 지연[ms] | 축 창 최대[rad/s] (첫 봉우리@ms) | 5–10 Hz 자이로·각가속도·가속도 | f[Hz] ζ(R²) | 정착[s] 명령 정지부터[s] | 엔코더 몫")
     for r in rows:
         print(f"{r['file'][:15]} {r['stop']} | J{r['joint']} {r['speed_dps']} {r['dist_deg']} | {r['tilt_deg']:.2f}° | {r['v_enc_dps']:+.1f} {r['t_stop_ms']} | "
-              f"{r['axis']} {r['peak1_rads']:+.4f}@{r['t_peak1_ms']} {r['max_rads']:.4f} | {r['gyro_rms']:.4f} {r['angacc_rms']:.3f} {r['acc_rms']:.3f}({r['acc_axis']}) | "
-              f"{r['f_fit']:.2f} {r['zeta_fit']:.3f}({r['r2']:.2f}) | {r['settle_s']} | {r['enc_share']}")
+              f"{r['axis']} {r['max_rads']:.4f} ({r['peak1_rads']:+.4f}@{r['t_peak1_ms']}) | {r['gyro_rms']:.4f} {r['angacc_rms']:.3f} {r['acc_rms']:.3f}({r['acc_axis']}) | "
+              f"{r['f_fit']:.2f} {r['zeta_fit']:.3f}({r['r2']:.2f}) | {r['settle_s']} {r['settle_cmd_s']} | {r['enc_share']}")
+    if rows:
+        ok = [r for r in rows if r["r2"] >= 0.8]  # 주파수·감쇠비 통계는 맞춤이 된 시행만
+        if ok:
+            print(f"f·ζ 통계(R² ≥ 0.8인 {len(ok)}/{len(rows)}개): f 중앙 {np.median([r['f_fit'] for r in ok]):.2f} Hz ({min(r['f_fit'] for r in ok):.2f}–{max(r['f_fit'] for r in ok):.2f}), "
+                  f"ζ 중앙 {np.median([r['zeta_fit'] for r in ok]):.3f} ({min(r['zeta_fit'] for r in ok):.3f}–{max(r['zeta_fit'] for r in ok):.3f})")
+        print(f"엔코더 정지 정의: {'(가) 0.1 s 이어진 첫 시각' if a.sustained else '(나) 처음 내려간 시각'} | 정착 바닥: {('고정 %.4f rad/s' % a.floor) if a.floor > 0 else '기록별'}")
+    if a.summary and rows:
+        summary(rows)
     if a.out and rows:
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
         with open(a.out, "w", newline="") as f:
