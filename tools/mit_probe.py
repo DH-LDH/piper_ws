@@ -34,6 +34,27 @@ MODE_GRACE_S = 0.2        # MIT 전환 후 모드 피드백이 MOVE M(4)이 될 
 LOG_ROOT = os.path.expanduser("~/piper_ws/logs/mit")
 
 
+def ramp_segs(a, A):  # 등속 후 정지 왕복(단계 D, vib_probe --stage ramp --round와 같은 구간 이름) — A: 멈추는 각[rad] → [(이름, 시간, 시작각, 끝각, 모양)]
+    S = A - math.radians(a.dist); d = abs(a.dist); Tc = max(0.5, math.pi / 2 * d / a.pre_vmax); Tl = d / a.speed
+    segs = [("pre", Tc, A, S, "cos"), ("wait", a.pre_hold, S, S, "hold")]
+    for _ in range(a.reps):
+        segs += [("ramp", Tl, S, A, "lin"), ("hold", a.stop_hold, A, A, "hold"), ("back", Tl, A, S, "lin"), ("bhold", a.stop_hold, S, S, "hold")]
+    return segs + [("post", Tc, S, A, "cos"), ("end", 1.0, A, A, "hold")]
+
+
+def ramp_at(segs, tt):  # → (구간 이름, 각, 속도, 가속도) — 등속 구간의 기준 가속도는 0(양 끝의 속도 계단은 TDE가 받는다)
+    for name, T, qa, qb, kind in segs:
+        if tt < T:
+            if kind == "lin":
+                return name, qa + (qb - qa) * tt / T, (qb - qa) / T, 0.0
+            if kind == "cos":
+                w = math.pi / T
+                return name, qa + (qb - qa) * (1 - math.cos(w * tt)) / 2, (qb - qa) * w / 2 * math.sin(w * tt), (qb - qa) * w * w / 2 * math.cos(w * tt)
+            return name, qa, 0.0, 0.0
+        tt -= T
+    return segs[-1][0], segs[-1][3], 0.0, 0.0
+
+
 def read_state(p):  # → q[rad], qd[rad/s], eff[N·m], enable[6], (arm_status, ctrl_mode, mode_feed)
     js = p.GetArmJointMsgs().joint_state
     q = np.radians([getattr(js, f"joint_{i}") / 1000.0 for i in range(1, 7)])
@@ -57,15 +78,19 @@ class Probe:
         if self.ext_kd is not None:
             self.kd = np.zeros(6)  # 펌웨어 감쇠 항도 끔 — 10-20 펌웨어 Kp 0에서도 J6 튐, 모터엔 우리 토크만
         os.makedirs(LOG_ROOT, exist_ok=True)
-        tag = time.strftime("%Y%m%d_%H%M%S") + ("_plan" if a.plan else f"_{a.stage}") + ("_fake" if a.fake else "") + ("" if a.go else "_dry")
+        tag = time.strftime("%Y%m%d_%H%M%S") + ("_plan" if a.plan else f"_{a.stage}") + (f"_j{a.joint}_v{a.speed:g}_d{a.dist:+g}_r{a.reps}" if a.stage == "ramp" else "") \
+            + (f"_{a.note}" if a.note else "") + ("_fake" if a.fake else "") + ("" if a.go else "_dry")
         self.path = os.path.join(LOG_ROOT, tag + ".csv")
         self.f = open(self.path, "w", newline="")
         self.w = csv.writer(self.f)
         J = range(1, 7)
         self.w.writerow(["t", "phase"] + [f"q{j}" for j in J] + [f"qd{j}" for j in J] + [f"eff{j}" for j in J]
                         + [f"qref{j}" for j in J] + [f"tff{j}" for j in J] + ["arm_status", "ctrl_mode", "mode_feed", "enabled"]
-                        + (["chirp"] if a.chirp_joint else []) + (["tau_vib"] if a.vib_joint else []))
-        self.t0 = time.time()
+                        + (["chirp"] if a.chirp_joint else []) + (["tau_vib"] if a.vib_joint else []) + (["seg"] if a.stage == "ramp" else []))
+        self.t0 = time.time(); self.seg = ""
+        if a.stage == "ramp":
+            with open(self.path.replace(".csv", ".t0"), "w") as m:
+                m.write(f"{self.t0:.6f}\n")
         self.imu = None; self.stream = None; self.imu_f = None
         if a.vib_joint:  # τ_vib: 실시간 수신이 IMU 기록도 맡음(장치는 한 프로세스만 잡음) — 형식은 imu_rec와 같음
             with open(self.path.replace(".csv", ".t0"), "w") as m:
@@ -125,7 +150,7 @@ class Probe:
         self.w.writerow([f"{time.time() - self.t0:.4f}", phase] + list(np.degrees(q).round(4)) + list(qd.round(4))
                         + list(eff.round(4)) + list(np.degrees(qref).round(4)) + list(np.round(tff, 4))
                         + list(st) + [int(en.all())] + ([] if not self.a.chirp_joint else [f"{chirp_v or 0.0:.5f}"])
-                        + ([] if not self.a.vib_joint else [f"{self.vib_now['v']:.5f}"]))
+                        + ([] if not self.a.vib_joint else [f"{self.vib_now['v']:.5f}"]) + ([self.seg if phase == "mit" else phase] if self.a.stage == "ramp" else []))
 
     def check(self, s, qref, phase, t_mit=None, vref=None):  # 중단 사유 문자열 또는 None
         q, qd, eff, en, st = s
@@ -158,6 +183,10 @@ class Probe:
         print(f"현재 q[deg] {np.degrees(q).round(1)} | enable {en.astype(int)} | status {st}")
         if not en.all() or st[0] != 0 or st[1] != 1:
             raise SystemExit("★ 팔이 위치 모드(CAN 제어)로 Enable된 상태가 아님 — traj_test로 시작 자세에 둔 뒤 실행")
+        if a.expect is not None:  # 멈추는 자세가 시행마다 같은지(vib_probe와 같은 확인) — 벗어나면 아무것도 보내지 않음
+            e = np.abs(np.degrees(q) - np.array(a.expect))
+            if e.max() > a.expect_tol:
+                raise SystemExit(f"★ 시작 자세가 기대와 다름: J{int(e.argmax()) + 1} {e.max():.2f}° > {a.expect_tol}° — 자세를 맞춘 뒤 실행")
         if a.go:
             p.MotionCtrl_2(0x01, 0x01, 10, 0x00)
         t_end = time.time() + SETTLE_S
@@ -203,6 +232,9 @@ class Probe:
             print(f"[dry-run] MIT 전환 시 보낼 첫 프레임 (관절, q_ref[rad], q̇_ref, Kp, Kd, τ_ff):")
             for j in range(6):
                 print(f"  JointMitCtrl({j + 1}, {q_hold[j]:+.4f}, 0.0, {self.kp[j]:.1f}, {self.kd[j]:.2f}, {tff[j]:+.3f})")
+            if a.stage == "ramp":
+                sg = ramp_segs(a, q_hold[a.joint - 1]); A = math.degrees(q_hold[a.joint - 1])
+                print(f"[dry-run] J{a.joint} 등속 후 정지 왕복: {A:.2f}° ↔ {A - a.dist:.2f}°, {a.speed:g}°/s × {abs(a.dist):g}°, 정지 후 {a.stop_hold:g} s, {a.reps}회 → MIT {a.hold + sum(x[1] for x in sg):.1f} s")
             if a.stage == "sine":
                 print(f"[dry-run] J{a.joint} 사인파: ±{a.amp}° {a.hz} Hz, {a.cycles}주기, 진폭 2 s 램프 → q_ref 범위 "
                       f"{np.degrees(q_hold[a.joint - 1]) - a.amp:.1f} ~ {np.degrees(q_hold[a.joint - 1]) + a.amp:.1f}°")
@@ -234,6 +266,9 @@ class Probe:
         t_start = time.time()
         hold_s = a.hold
         dur = hold_s + (a.cycles / a.hz + 2.0 if a.stage == "sine" else 0.0)
+        if a.stage == "ramp":
+            self.segs = ramp_segs(a, q_hold[a.joint - 1]); dur = hold_s + sum(x[1] for x in self.segs); self.seg = "lead"
+            print(f"J{a.joint} 등속 후 정지 왕복 {a.speed:g}°/s × {abs(a.dist):g}° × {a.reps}회, MIT {dur:.1f} s", flush=True)
         plan = None
         if a.plan:  # (가) 한 시행 안 계획 — 길이·처프·a′·k를 계획이 정함(8절 10/27 오후 8–9)
             from vib_plan import Plan, PlanCfg
@@ -284,6 +319,8 @@ class Probe:
                     qr[jj] = q_hold[jj] + A * math.sin(w * ts)
                     vr[jj] = A * w * math.cos(w * ts)
                     arv[jj] = -A * w * w * math.sin(w * ts)
+            if a.stage == "ramp" and tt > hold_s:
+                self.seg, qr[j6], vr[j6], arv[j6] = ramp_at(self.segs, tt - hold_s)
             pi = None
             if plan is not None:
                 pi = plan.at(tt)
@@ -609,7 +646,16 @@ def print_tilt(path, s0=0.0):  # 링크 처짐 상태(VIB_E3·8절 10/26): MIT �
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stage", choices=["hold", "sine"], default="hold")
+    ap.add_argument("--stage", choices=["hold", "sine", "ramp"], default="hold", help="ramp: --joint를 등속 후 정지 왕복(단계 D) — 지금 자세가 멈추는 자세")
+    ap.add_argument("--speed", type=float, default=10.0, help="ramp 등속[deg/s]")
+    ap.add_argument("--dist", type=float, default=10.0, help="ramp 이동 거리[deg], 부호 = 멈추는 자세로 들어오는 방향(J2는 +가 내림, vib_probe와 같음)")
+    ap.add_argument("--reps", type=int, default=6, help="ramp 왕복 수")
+    ap.add_argument("--stop-hold", type=float, default=3.0, help="ramp 정지 후 유지[s]")
+    ap.add_argument("--pre-vmax", type=float, default=5.0, help="ramp 출발점까지 빼는 최고 속도[deg/s] (코사인)")
+    ap.add_argument("--pre-hold", type=float, default=3.0, help="ramp 출발점에서 기다리는 시간[s]")
+    ap.add_argument("--note", default="", help="파일명에 붙일 메모")
+    ap.add_argument("--expect", type=float, nargs=6, default=None, help="기대 시작 자세[deg] — 벗어나면 시작하지 않음")
+    ap.add_argument("--expect-tol", type=float, default=1.0)
     ap.add_argument("--go", action="store_true", help="실제로 명령 송신(없으면 dry-run)")
     ap.add_argument("--fake", action="store_true", help="가짜 팔로 로직 시험(CAN 미사용)")
     ap.add_argument("--fake-kick", action="store_true", help="가짜 팔에 진입 튐 주입(중단 로직 시험)")
@@ -709,6 +755,8 @@ def main():
             raise SystemExit("--mbars: --tdc-joints와 같은 개수, 각 0.02 이하")
     elif a.mbars:
         raise SystemExit("--mbars는 --tdc-joints와 같이")
+    if a.stage == "ramp" and not (1 <= a.joint <= 3 and 0 < abs(a.dist) <= 15 and 0 < a.speed <= 15 and 0 < a.pre_vmax <= 10 and 1 <= a.reps <= 8 and a.speed_err and not a.chirp_joint and not a.plan):
+        raise SystemExit("--stage ramp: --joint 1–3, 거리 15° 이하, 속도 15°/s 이하(20°/s는 위치 모드에서도 등속 불가), --speed-err 필요, 처프·계획과 같이 쓰지 않음")
     if a.tau_rate and (not a.tdc or not 0.1 <= a.tau_rate <= 2.0 or a.chirp_joint or a.vib_joint):
         raise SystemExit("--tau-rate: --tdc 필요, 0.1–2.0 N·m, 처프·τ_vib와는 같이 쓰지 않음(그 토크까지 깎임)")
     if abs(a.vib_lead_deg) > 180:
@@ -753,7 +801,8 @@ def main():
         p = C_PiperInterface_V2(a.can); p.ConnectPort(); time.sleep(0.5)
         print(f"CAN 버스: {bus_type(p)}")
         p.SearchPiperFirmwareVersion(); time.sleep(0.3)
-        print(f"펌웨어: {p.GetPiperFirmwareVersion()} | piper_sdk {__import__('importlib.metadata').metadata.version('piper_sdk')}")
+        a.fw, a.sdk = str(p.GetPiperFirmwareVersion()), __import__("importlib.metadata").metadata.version("piper_sdk")
+        print(f"펌웨어: {a.fw} | piper_sdk {a.sdk}")
     pr = Probe(p, a)
     try:
         res = pr.run()
@@ -776,6 +825,13 @@ def main():
                 pr.imu.kill()
         for f in pr.tdc_files:
             f.close()
+    if a.stage == "ramp":  # vib_stop_report가 읽는 조건 표(.meta.json) — ctrl: pd(펌웨어 PD + 유지 토크) / tde / asmc16, 추종층 관절이 여럿이면 _j123
+        import json
+        ctrl = "pd" if not a.tdc else ("asmc16" if a.asmc16 else "asmc" if a.asmc else "tde") + ("_j" + "".join(map(str, a.tdc_joints)) if a.tdc_joints and len(a.tdc_joints) > 1 else "")
+        with open(pr.path.replace(".csv", ".meta.json"), "w") as f:
+            json.dump({"stage": "ramp", "mode": "mit", "ctrl": ctrl, "fw": getattr(a, "fw", "fake"), "sdk": getattr(a, "sdk", "fake"), "go": a.go, "fake": a.fake, "note": a.note, "result": res, "t0": pr.t0,
+                       "tau_rate": a.tau_rate, "n_lim": {str(j + 1): n for j, n in getattr(pr, "n_lim", {}).items()}, "n_cyc": getattr(pr, "n_cyc", 0),
+                       "args": {k: v for k, v in vars(a).items() if k not in ("fw", "sdk")}}, f, ensure_ascii=False, indent=1)
     print(f"결과: {res}\n기록: {pr.path}" + (f"\nIMU: {pr.path.replace('.csv', '.imu.csv')}" if pr.imu else "") + (f"\nCAN 원본: {pr.path.replace('.csv', '.candump')}" if pr.dump else ""))
     if getattr(pr, "td_stats", None):
         print(pr.td_stats)

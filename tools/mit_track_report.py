@@ -43,7 +43,7 @@ def report(p):
             + (f"{np.abs(x[sec & ~new]).max():.2f}" if (sec & ~new).any() else "—")
         if j in ours:
             tau = tff[:, j - 1]; dt_ = np.abs(np.diff(tau)); k = ~new[1:] & ~new[:-1] & (tm[1:] > 0.5)
-            a += f" | {tau.min():+.2f}–{tau.max():+.2f} | {int((np.abs(tau) >= TAU_CMD_LIMIT - 1e-3).sum())} | {dt_.max():.3f}({dt_[k].max() if k.any() else float('nan'):.3f})"
+            a += f" | {tau.min():+.2f}–{tau.max():+.2f} | {int((np.abs(tau) >= TAU_CMD_LIMIT - 1e-3).sum())}(창 밖 {int(((np.abs(tau) >= TAU_CMD_LIMIT - 1e-3) & ~new).sum())}) | {dt_.max():.3f}({dt_[k].max() if k.any() else float('nan'):.3f})"
             f = files.get(str(j)) or (files.get("") if j in main_j else None)
             if f:
                 c = pd.read_csv(f)
@@ -54,6 +54,10 @@ def report(p):
                     a += " | 제한 없음(옛 기록)"
                 a += f" | K̂ 최대 {c.K.max():.1f}"
         print(a)
+    for j in ours:  # 정지 구간에서 토크가 수렴한 값(9절 11/18 22번 — 상한까지의 여유가 처짐 상태에 따라 달라지는지)
+        still = np.abs(np.gradient(qr[:, j - 1], tm)) < 1e-3
+        if (still & (tm > 1.0)).sum() > 20:
+            x = tff[still & (tm > 1.0), j - 1]; print(f"   J{j} 정지 구간 토크 중앙 {np.median(x):+.2f} N·m (범위 {x.min():+.2f}–{x.max():+.2f}), 상한까지 여유 {TAU_CMD_LIMIT - np.abs(x).max():.2f}")
     print(f"   끝: 마지막 구간 {last}, MIT 마지막 표본 이탈 최대 {np.abs(dev[-1]).max():.2f}°")
 
 

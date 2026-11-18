@@ -4,6 +4,7 @@
 정지 시점: 명령 정지 t_cmd(ramp→hold 전환, 다른 단계는 qref가 멈춘 때) 뒤, 엔코더 속도(위치 미분, 55 ms 평활)가 문턱 아래로 처음 내려간 시각 t_enc(9절 11/17 정의 (나)).
           --sustained면 문턱 아래로 0.1 s 이어진 첫 시각(11/16 정의 (가) — 멈춘 직후 되돌아가는 시행에서 85 ms쯤 늦게 잡힘, FW191_C_LOG 2.3절).
 창: t_enc부터 --win s. 자이로는 카메라 축, 주축은 창 안 2–20 Hz 에너지가 가장 큰 축(--axis로 고정 가능).
+MIT 기록(mit_probe --stage ramp, logs/mit)도 같은 식으로 읽는다: ctrl 열(pos / pd / tde / asmc16 / asmc16_j123), jump 열(창이 MIT 순간 튐의 제외 구간 −0.1–+1.2 s와 겹치면 1 — 시행 집계에서 버림).
 열: shape(.meta.json의 성형 종류), rep(왕복 회차), arrive(도착 방향, +면 관절각이 커지며 도착 — J2는 내림), stop_deg(멈춘 각), gap_*(창 안 자이로 표본 빈틈 수·시간 비율·최대 간격).
 집계: --trial-out 시행(기록)별 중앙값, --judge 성형 없음 대비 비와 판정(자이로·가속도 둘 다 0.83 이하 감소, 하나라도 1.2 이상 증가, 시행 범위 겹치면 경향).
 지표: 창 최대(진폭 지표, 20 Hz 저역·창 끝 0.5 s 평균을 뺀 값. 첫 봉우리는 참고), 5–10 Hz rms(자이로 주축·3축 크기·각가속도, 가속도 주축·3축 크기),
@@ -22,13 +23,14 @@ import numpy as np
 import pandas as pd
 from scipy import optimize, signal
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "common_pkg"))
 from vib_analyze import decay  # noqa: E402
 
 FS = 200.0
-COLS = ["file", "fw", "sdk", "joint", "speed_dps", "dist_deg", "shape", "t_move_s", "stop", "rep", "arrive", "stop_deg", "tilt_deg", "v_enc_dps", "t_stop_ms", "axis", "peak1_rads", "t_peak1_ms", "max_rads",
+COLS = ["file", "fw", "sdk", "ctrl", "joint", "speed_dps", "dist_deg", "shape", "t_move_s", "stop", "rep", "arrive", "stop_deg", "tilt_deg", "v_enc_dps", "t_stop_ms", "axis", "peak1_rads", "t_peak1_ms", "max_rads",
         "gyro_rms", "gyro_vec_rms", "angacc_rms", "acc_axis", "acc_rms", "acc_vec_rms", "f_fit", "zeta_fit", "r2", "f_fft", "zeta_log", "n_cyc",
-        "settle_s", "settle_cmd_s", "floor_rads", "floor_own_rads", "enc_rms", "enc_share", "gap_n", "gap_frac", "gap_max_ms"]
+        "settle_s", "settle_cmd_s", "floor_rads", "floor_own_rads", "enc_rms", "enc_share", "gap_n", "gap_frac", "gap_max_ms", "jump"]
 UPDOWN = {"+": "내림", "-": "올림"}  # J2: 관절각이 커지며 도착(+)이 내림
 
 
@@ -113,7 +115,11 @@ def enc_rate_cam(d, kin_tb, tu):  # 엔코더로 계산한 끝단 각속도(카�
 
 def analyze(path, a, kin_tb):
     d = pd.read_csv(path); t0 = float(open(path.replace(".csv", ".t0")).read()); mp = path.replace(".csv", ".meta.json")
-    meta = json.load(open(mp)) if os.path.exists(mp) else {}; ip = path.replace(".csv", ".imu.csv")
+    meta = json.load(open(mp)) if os.path.exists(mp) else {}; ip = path.replace(".csv", ".imu.csv"); jw = []
+    if "seg" in d.columns:  # mit_probe --stage ramp 기록: MIT 구간의 구간 이름(seg)을 phase로 쓰고, MIT 순간 튐의 제외 구간(−0.1–+1.2 s, 9절 11/17 22:04)을 구해 둠
+        from mit_jump_report import events
+        tm0 = d.t.values[d.phase.values == "mit"][0]; jw = [(tm0 + e["t_mit"] - 0.1, tm0 + e["t_mit"] + 1.2) for e in events(path, 0.5)[0]]
+        d["phase"] = np.where(d.phase == "mit", d.seg, d.phase)
     if not os.path.exists(ip):
         print(f"{os.path.basename(path)}: IMU 기록 없음 — 건너뜀"); return [], None
     imu = load_imu(ip, t0, a.imu_lag / 1000.0); t = d.t.values; rows = []; fig = None
@@ -171,7 +177,7 @@ def analyze(path, a, kin_tb):
         if args.get("dist") not in (None, "") and name in ("hold", "bhold"):
             arrive = "+" if (float(args["dist"]) > 0) == (name == "hold") else "-"
         gn, gf, gm = gaps(imu["g"][0], t_enc, t2)
-        row = dict(file=os.path.basename(path), fw=meta.get("fw", ""), sdk=meta.get("sdk", ""), joint=j, speed_dps=args.get("speed", ""), dist_deg=args.get("dist", ""),
+        row = dict(file=os.path.basename(path), fw=meta.get("fw", ""), sdk=meta.get("sdk", ""), ctrl=meta.get("ctrl", "pos"), jump=int(any(a1 < t2 and b1 > t_enc for a1, b1 in jw)), joint=j, speed_dps=args.get("speed", ""), dist_deg=args.get("dist", ""),
                    shape=(meta.get("shape") or {}).get("kind", "none"), t_move_s=t_move, stop=name, rep=nrep[name], arrive=arrive,
                    stop_deg=round(float(np.interp(t_cmd + 0.5, t, d[f"qref{j}"].values)), 2), gap_n=gn, gap_frac=gf, gap_max_ms=gm, tilt_deg=round(tilt, 2), v_enc_dps=round(v_run, 2), t_stop_ms=round((t_enc - t_cmd) * 1000), axis="xyz"[ax],
                    peak1_rads=round(float(gl[i1]), 4), t_peak1_ms=round(float(tt[i1]) * 1000), max_rads=round(float(np.abs(gl).max()), 4),
@@ -203,35 +209,39 @@ def summary(rows):  # 조건별 표 — 중앙값(최소–최대), f·ζ는 R²
               f"{mr(m.settle_s, 2)} | {mr(m.settle_cmd_s, 2)} | {m.enc_share.median():.2f} |")
 
 
-def trials(rows):  # 시행(기록)별 중앙값 — 왕복이면 정지 종류(hold·bhold)마다 한 줄, 통계 단위는 시행(9절 11/17 6번)
+def trials(rows):  # 시행(기록)별 중앙값 — 왕복이면 정지 종류(hold·bhold)마다 한 줄, 통계 단위는 시행(9절 11/17 6번). MIT 기록은 튐이 겹친 창을 버린 중앙값(n_win = 남은 창 수)과 버리지 않은 값(_inc)을 같이
     d = pd.DataFrame(rows); out = []
-    for (f, st), m in d.groupby(["file", "stop"], sort=False):
-        ok = m[m.r2 >= 0.8]; r0 = m.iloc[0]
-        out.append(dict(file=f, speed_dps=r0.speed_dps, dist_deg=r0.dist_deg, shape=r0["shape"], stop=st, arrive=r0.arrive, stop_deg=r0.stop_deg, n_win=len(m), tilt_deg=r0.tilt_deg,
-                        gyro_rms=round(float(m.gyro_rms.median()), 5), acc_rms=round(float(m.acc_rms.median()), 4), max_rads=round(float(m.max_rads.median()), 4),
-                        settle_s=round(float(m.settle_s.median()), 2), settle_cmd_s=round(float(m.settle_cmd_s.median()), 2), t_stop_ms=round(float(m.t_stop_ms.median())),
+    for (f, st), m0 in d.groupby(["file", "stop"], sort=False):
+        m = m0[m0.jump == 0]; ok = m[m.r2 >= 0.8]; r0 = m0.iloc[0]; med = lambda x, n: round(float(x.median()), n) if len(x) else float("nan")
+        out.append(dict(file=f, cond=r0.ctrl + ("" if r0["shape"] == "none" else "+" + r0["shape"]), ctrl=r0.ctrl, speed_dps=r0.speed_dps, dist_deg=r0.dist_deg, shape=r0["shape"], stop=st, arrive=r0.arrive, stop_deg=r0.stop_deg,
+                        n_win=len(m), n_jump=int(m0.jump.sum()), tilt_deg=r0.tilt_deg, gyro_rms=med(m.gyro_rms, 5), acc_rms=med(m.acc_rms, 4), max_rads=med(m.max_rads, 4),
+                        settle_s=med(m.settle_s, 2), settle_cmd_s=med(m.settle_cmd_s, 2), t_stop_ms=med(m.t_stop_ms, 0),
                         f_fit=round(float(ok.f_fit.median()), 2) if len(ok) else "", zeta_fit=round(float(ok.zeta_fit.median()), 3) if len(ok) else "", n_r2=len(ok),
-                        enc_share=round(float(m.enc_share.median()), 3), gap_max_ms=round(float(m.gap_max_ms.max()), 1), gap_frac=round(float(m.gap_frac.median()), 3)))
+                        enc_share=med(m.enc_share, 3), gap_max_ms=round(float(m0.gap_max_ms.max()), 1), gap_frac=round(float(m0.gap_frac.median()), 3),
+                        gyro_rms_inc=med(m0.gyro_rms, 5), acc_rms_inc=med(m0.acc_rms, 4)))
     return out
 
 
-def judge(tr):  # 성형 없음 대비 비와 판정 — 자이로·가속도 둘 다 0.83 이하면 감소, 하나라도 1.2 이상이면 증가, 시행 범위가 겹치면 경향(9절 11/17 6번)
+def judge(tr):  # 기준(위치 모드, 성형 없음 = cond "pos") 대비 비와 판정 — 자이로·가속도 둘 다 0.83 이하면 감소, 하나라도 1.2 이상이면 증가, 시행 범위가 겹치면 경향(9절 11/17 6번). MIT 조건은 튐 제외 값으로 판정하고 포함 값의 비를 병기
     d = pd.DataFrame(tr); d = d[d.speed_dps != ""]
-    if d.empty or d["shape"].nunique() < 2 or "none" not in set(d["shape"]):
+    if d.empty or d.cond.nunique() < 2 or "pos" not in set(d.cond):
         return
     mr = lambda x, n: f"{x.median():.{n}f} ({x.min():.{n}f}–{x.max():.{n}f})"
-    print("\n| 속도 [°/s] | 정지 | 성형 | 시행 수 | 5–10 Hz 자이로 rms [rad/s] | 비 | 가속도 rms [m/s²] | 비 | 창 최대 [rad/s] | 정착 [s] | 명령 정지부터 정착 [s] | f [Hz] | 판정 |")
-    print("|" + "---|" * 13)
+    print("\n| 속도 [°/s] | 정지 | 조건 | 시행 수(유효 창 3개 미만) | 5–10 Hz 자이로 rms [rad/s] | 비 | 가속도 rms [m/s²] | 비 | 튐 포함 자이로 비 | 버린 창 | 창 최대 [rad/s] | 정착 [s] | f [Hz] | 판정 |")
+    print("|" + "---|" * 14)
+    order = ["pos"] + [c for c in dict.fromkeys(d.cond) if c != "pos"]
     for (v, st), g in d.groupby(["speed_dps", "stop"], sort=True):
-        b = g[g["shape"] == "none"]; r0 = g.iloc[0]
+        b = g[g.cond == "pos"]; r0 = g.iloc[0]
+        if b.empty:
+            continue
         where = f"{st} ({UPDOWN.get(r0.arrive, r0.arrive)}, {r0.stop_deg:g}°)"
-        for sh in ("none", "zv", "zvd"):
-            m = g[g["shape"] == sh]
+        for c in order:
+            m = g[(g.cond == c) & g.gyro_rms.notna()]
             if m.empty:
                 continue
-            rg = m.gyro_rms.median() / b.gyro_rms.median(); ra = m.acc_rms.median() / b.acc_rms.median()
+            rg = m.gyro_rms.median() / b.gyro_rms.median(); ra = m.acc_rms.median() / b.acc_rms.median(); ri = m.gyro_rms_inc.median() / b.gyro_rms_inc.median()
             lap = m.gyro_rms.max() >= b.gyro_rms.min() and m.gyro_rms.min() <= b.gyro_rms.max()  # 시행 범위가 겹치는지(자이로)
-            if sh == "none":
+            if c == "pos":
                 verdict = "기준"
             elif rg >= 1.2 or ra >= 1.2:
                 verdict = "증가" + ("(범위 겹침 → 경향)" if lap else "")
@@ -240,7 +250,7 @@ def judge(tr):  # 성형 없음 대비 비와 판정 — 자이로·가속도 �
             else:
                 verdict = "차이 없음"
             ff = pd.to_numeric(m.f_fit, errors="coerce").dropna()
-            print(f"| {float(v):g} | {where} | {sh} | {len(m)} | {mr(m.gyro_rms, 4)} | {rg:.2f} | {mr(m.acc_rms, 3)} | {ra:.2f} | {mr(m.max_rads, 3)} | {mr(m.settle_s, 2)} | {mr(m.settle_cmd_s, 2)} | "
+            print(f"| {float(v):g} | {where} | {c} | {len(m)}({int((m.n_win < 3).sum())}) | {mr(m.gyro_rms, 4)} | {rg:.2f} | {mr(m.acc_rms, 3)} | {ra:.2f} | {ri:.2f} | {int(m.n_jump.sum())} | {mr(m.max_rads, 3)} | {mr(m.settle_s, 2)} | "
                   + (f"{ff.median():.2f}" if len(ff) else "—") + f" | {verdict} |")
 
 
@@ -274,7 +284,7 @@ def main():
         r, f = analyze(p, a, kin_tb); rows += r; fig = fig or f
     print("기록 | 관절 속도 거리 | 기울기 | 도달 속도[°/s] 정지 지연[ms] | 축 창 최대[rad/s] (첫 봉우리@ms) | 5–10 Hz 자이로·각가속도·가속도 | f[Hz] ζ(R²) | 정착[s] 명령 정지부터[s] | 엔코더 몫 | IMU 빈틈(자이로, 창 안)")
     for r in rows:
-        print(f"{r['file'][:15]} {r['stop']}{r['rep']} {r['shape']} {UPDOWN.get(r['arrive'], '')} {r['stop_deg']:g}° | J{r['joint']} {r['speed_dps']} {r['dist_deg']} | {r['tilt_deg']:.2f}° | {r['v_enc_dps']:+.1f} {r['t_stop_ms']} | "
+        print(f"{r['file'][:15]} {r['ctrl']} {r['stop']}{r['rep']}{'★튐' if r['jump'] else ''} {r['shape']} {UPDOWN.get(r['arrive'], '')} {r['stop_deg']:g}° | J{r['joint']} {r['speed_dps']} {r['dist_deg']} | {r['tilt_deg']:.2f}° | {r['v_enc_dps']:+.1f} {r['t_stop_ms']} | "
               f"{r['axis']} {r['max_rads']:.4f} ({r['peak1_rads']:+.4f}@{r['t_peak1_ms']}) | {r['gyro_rms']:.4f} {r['angacc_rms']:.3f} {r['acc_rms']:.3f}({r['acc_axis']}) | "
               f"{r['f_fit']:.2f} {r['zeta_fit']:.3f}({r['r2']:.2f}) | {r['settle_s']} {r['settle_cmd_s']} | {r['enc_share']} | 빈틈 {r['gap_n']}개 {100 * r['gap_frac']:.0f}% 최대 {r['gap_max_ms']:.0f} ms")
     if rows:
