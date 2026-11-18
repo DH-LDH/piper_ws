@@ -88,8 +88,12 @@ def run(a):
         if a.pause and a.go:
             input(f"[{r['idx']}/{len(rows)}] {r['cond']} — Enter로 시작(Ctrl-C로 끝)")
         print(f"── [{r['idx']}/{len(rows)}] 블록 {r['block']} {r['cond']}", flush=True)
-        out = subprocess.run(cmd, capture_output=True, text=True); txt = out.stdout + out.stderr
-        res = next((ln[4:] for ln in txt.splitlines() if ln.startswith("결과: ")), txt.strip().splitlines()[-1] if txt.strip() else "출력 없음")
+        for attempt in range(4):  # 시작 전 정지 확인이 J5 서보 움찔(0.2–0.3 rad/s)로 걸리면 팔은 그대로 서 있음 → 3번까지 다시 시도
+            out = subprocess.run(cmd, capture_output=True, text=True); txt = out.stdout + out.stderr
+            res = next((ln[4:] for ln in txt.splitlines() if ln.startswith("결과: ")), txt.strip().splitlines()[-1] if txt.strip() else "출력 없음")
+            if not (a.go and "위치 모드에서 정지 상태가 아님" in res and attempt < 3):
+                break
+            print(f"   정지 확인에 걸림({res[:60]}…) — {attempt + 1}번째 다시 시도", flush=True); time.sleep(2.0)
         path = next((ln[4:] for ln in txt.splitlines() if ln.startswith("기록: ")), "")
         if not a.go:
             print("\n".join("   " + ln for ln in txt.splitlines() if "등속 후 정지" in ln or "끝단 이동" in ln or "성형" in ln or "명령이" in ln or ln.startswith(("결과", "★")))); continue
