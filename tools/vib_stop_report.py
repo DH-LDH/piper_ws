@@ -4,6 +4,8 @@
 정지 시점: 명령 정지 t_cmd(ramp→hold 전환, 다른 단계는 qref가 멈춘 때) 뒤, 엔코더 속도(위치 미분, 55 ms 평활)가 문턱 아래로 처음 내려간 시각 t_enc(9절 11/17 정의 (나)).
           --sustained면 문턱 아래로 0.1 s 이어진 첫 시각(11/16 정의 (가) — 멈춘 직후 되돌아가는 시행에서 85 ms쯤 늦게 잡힘, FW191_C_LOG 2.3절).
 창: t_enc부터 --win s. 자이로는 카메라 축, 주축은 창 안 2–20 Hz 에너지가 가장 큰 축(--axis로 고정 가능).
+열: shape(.meta.json의 성형 종류), rep(왕복 회차), arrive(도착 방향, +면 관절각이 커지며 도착 — J2는 내림), stop_deg(멈춘 각), gap_*(창 안 자이로 표본 빈틈 수·시간 비율·최대 간격).
+집계: --trial-out 시행(기록)별 중앙값, --judge 성형 없음 대비 비와 판정(자이로·가속도 둘 다 0.83 이하 감소, 하나라도 1.2 이상 증가, 시행 범위 겹치면 경향).
 지표: 창 최대(진폭 지표, 20 Hz 저역·창 끝 0.5 s 평균을 뺀 값. 첫 봉우리는 참고), 5–10 Hz rms(자이로 주축·3축 크기·각가속도, 가속도 주축·3축 크기),
       모드 주파수·감쇠비(감쇠 사인 맞춤, 로그 감소율 병기 — 통계는 R² 0.8 이상 시행만), 정착 시간(2–20 Hz 포락선이 잡음 바닥 2배 아래로 0.3 s 이어지는 첫 시각, 유지 구간 끝까지 봄),
       명령 정지부터 정착까지(settle_cmd_s = 정지 지연 + 정착 시간), 엔코더 몫(같은 창 엔코더 각속도 rms / 끝단), 명령 이동 시간(t_move_s = 거리 / 속도).
@@ -24,9 +26,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from vib_analyze import decay  # noqa: E402
 
 FS = 200.0
-COLS = ["file", "fw", "sdk", "joint", "speed_dps", "dist_deg", "t_move_s", "stop", "tilt_deg", "v_enc_dps", "t_stop_ms", "axis", "peak1_rads", "t_peak1_ms", "max_rads",
+COLS = ["file", "fw", "sdk", "joint", "speed_dps", "dist_deg", "shape", "t_move_s", "stop", "rep", "arrive", "stop_deg", "tilt_deg", "v_enc_dps", "t_stop_ms", "axis", "peak1_rads", "t_peak1_ms", "max_rads",
         "gyro_rms", "gyro_vec_rms", "angacc_rms", "acc_axis", "acc_rms", "acc_vec_rms", "f_fit", "zeta_fit", "r2", "f_fft", "zeta_log", "n_cyc",
-        "settle_s", "settle_cmd_s", "floor_rads", "floor_own_rads", "enc_rms", "enc_share"]
+        "settle_s", "settle_cmd_s", "floor_rads", "floor_own_rads", "enc_rms", "enc_share", "gap_n", "gap_frac", "gap_max_ms"]
+UPDOWN = {"+": "내림", "-": "올림"}  # J2: 관절각이 커지며 도착(+)이 내림
 
 
 def load_imu(path, t0, lag=0.0):  # → {"a": (t, xyz), "g": (t, xyz)} — 장치 시각 + 수신 시각 최소 지연으로 기록 시각 축에
@@ -52,6 +55,11 @@ def band(x, lo, hi, deriv=False):  # 창 안 FFT 벽돌 필터(vib_d3_report와 
 
 def rms(x):
     return float(np.sqrt(np.mean(np.square(x))))
+
+
+def gaps(t, t1, t2):  # 창 안 표본 빈틈(간격이 기록 중앙값의 1.5배 초과) → (개수, 빈틈이 차지하는 시간 비율, 최대 간격 ms)
+    dt = np.diff(t); med = float(np.median(dt)); m = (t[1:] > t1) & (t[:-1] < t2); g = dt[m][dt[m] > 1.5 * med]
+    return len(g), round(float(g.sum()) / max(t2 - t1, 1e-9), 3), round(float(dt[m].max()) * 1000, 1) if m.any() else float("nan")
 
 
 def fit_decay(t, y):  # y ≈ A e^{−ζωt} cos(ω_d t + φ) — (f, ζ, R²)
@@ -118,7 +126,9 @@ def analyze(path, a, kin_tb):
         sl = [("tap", t_tap, 2, t[-1])]; t_still = (t[0] + 0.3, t_tap - 0.3)
     ga = imu["a"]; w = (ga[0] > t_still[0]) & (ga[0] < t_still[1])
     g = ga[1][w].mean(0) if w.sum() > 20 else np.full(3, np.nan); tilt = float(np.degrees(np.arctan2(g[1], -g[2])))
+    nrep = {}
     for name, t_cmd, j, t_lim in sl:
+        nrep[name] = nrep.get(name, 0) + 1
         tu = np.arange(max(t[0], t_cmd - 1.5), min(t[-1], t_cmd + a.win + 1.0), 1 / FS); q = np.interp(tu, t, d[f"q{j}"].values)
         v = signal.savgol_filter(q, 11, 2, deriv=1, delta=1 / FS)  # 엔코더 속도[deg/s] — 속도 피드백은 잡음(0.1 rad/s)이 커서 위치 미분
         pre = (tu > t_cmd - 0.5) & (tu < t_cmd + 0.1); v_run = float(v[pre][np.argmax(np.abs(v[pre]))]) if pre.sum() > 5 else 0.0  # 정지 직전 실제로 도달한 최고 속도
@@ -157,8 +167,13 @@ def analyze(path, a, kin_tb):
         e5 = rms(band(E[:, ax], 5, 10)) if E is not None else rms(band(np.radians(signal.savgol_filter(np.interp(tg, t, d[f"q{j}"].values), 11, 2, deriv=1, delta=1 / FS)), 5, 10))
         g5 = rms(band(G[:, ax], 5, 10))
         t_move = round(abs(float(args["dist"])) / float(args["speed"]), 4) if "ramp" in set(d.phase.values) and args.get("speed") else ""  # 명령 이동 시간
-        row = dict(file=os.path.basename(path), fw=meta.get("fw", ""), sdk=meta.get("sdk", ""), joint=j, speed_dps=args.get("speed", ""), dist_deg=args.get("dist", ""), t_move_s=t_move,
-                   stop=name, tilt_deg=round(tilt, 2), v_enc_dps=round(v_run, 2), t_stop_ms=round((t_enc - t_cmd) * 1000), axis="xyz"[ax],
+        arrive = ""  # 도착 방향: hold는 dist 부호, bhold(왕복의 돌아간 쪽)는 반대
+        if args.get("dist") not in (None, "") and name in ("hold", "bhold"):
+            arrive = "+" if (float(args["dist"]) > 0) == (name == "hold") else "-"
+        gn, gf, gm = gaps(imu["g"][0], t_enc, t2)
+        row = dict(file=os.path.basename(path), fw=meta.get("fw", ""), sdk=meta.get("sdk", ""), joint=j, speed_dps=args.get("speed", ""), dist_deg=args.get("dist", ""),
+                   shape=(meta.get("shape") or {}).get("kind", "none"), t_move_s=t_move, stop=name, rep=nrep[name], arrive=arrive,
+                   stop_deg=round(float(np.interp(t_cmd + 0.5, t, d[f"qref{j}"].values)), 2), gap_n=gn, gap_frac=gf, gap_max_ms=gm, tilt_deg=round(tilt, 2), v_enc_dps=round(v_run, 2), t_stop_ms=round((t_enc - t_cmd) * 1000), axis="xyz"[ax],
                    peak1_rads=round(float(gl[i1]), 4), t_peak1_ms=round(float(tt[i1]) * 1000), max_rads=round(float(np.abs(gl).max()), 4),
                    gyro_rms=round(g5, 5), gyro_vec_rms=round(float(np.sqrt(sum(rms(band(G[:, c], 5, 10)) ** 2 for c in range(3)))), 5),
                    angacc_rms=round(rms(band(G[:, ax], 5, 10, deriv=True)), 4), acc_axis="xyz"[aax], acc_rms=round(rms(band(A[:, aax], 5, 10)), 4),
@@ -178,7 +193,7 @@ def summary(rows):  # 조건별 표 — 중앙값(최소–최대), f·ζ는 R²
     d = pd.DataFrame(rows); d = d[d.speed_dps != ""].copy()
     if d.empty:
         return
-    d["d"] = d.dist_deg.astype(float).abs(); d["dir"] = np.where(d.dist_deg.astype(float) > 0, "+", "−"); d["v"] = d.speed_dps.astype(float)
+    d["d"] = d.dist_deg.astype(float).abs(); d["dir"] = np.where(d.arrive == "", np.where(d.dist_deg.astype(float) > 0, "+", "-"), d.arrive); d["v"] = d.speed_dps.astype(float)
     mr = lambda x, n: f"{x.median():.{n}f} ({x.min():.{n}f}–{x.max():.{n}f})"
     print("| 속도 [°/s] | 거리 [°] | 방향 | 정지 | n | 명령 이동 시간 [s] | 도달 속도 [°/s] | 5–10 Hz 자이로 rms [rad/s] | 창 최대 [rad/s] | 가속도 rms [m/s²] | f [Hz] | ζ | R² ≥ 0.8 | 정착 [s] | 명령 정지부터 정착 [s] | 엔코더 몫 |")
     print("|" + "---|" * 16)
@@ -186,6 +201,47 @@ def summary(rows):  # 조건별 표 — 중앙값(최소–최대), f·ζ는 R²
         ok = m[m.r2 >= 0.8]; fz = (f"{ok.f_fit.median():.2f} | {ok.zeta_fit.median():.3f}" if len(ok) else "— | —")
         print(f"| {v:g} | {dd:g} | {dr} | {st} | {len(m)} | {dd / v:.3f} | {m.v_enc_dps.abs().median():.1f} | {mr(m.gyro_rms, 4)} | {mr(m.max_rads, 3)} | {m.acc_rms.median():.3f} | {fz} | {len(ok)}/{len(m)} | "
               f"{mr(m.settle_s, 2)} | {mr(m.settle_cmd_s, 2)} | {m.enc_share.median():.2f} |")
+
+
+def trials(rows):  # 시행(기록)별 중앙값 — 왕복이면 정지 종류(hold·bhold)마다 한 줄, 통계 단위는 시행(9절 11/17 6번)
+    d = pd.DataFrame(rows); out = []
+    for (f, st), m in d.groupby(["file", "stop"], sort=False):
+        ok = m[m.r2 >= 0.8]; r0 = m.iloc[0]
+        out.append(dict(file=f, speed_dps=r0.speed_dps, dist_deg=r0.dist_deg, shape=r0["shape"], stop=st, arrive=r0.arrive, stop_deg=r0.stop_deg, n_win=len(m), tilt_deg=r0.tilt_deg,
+                        gyro_rms=round(float(m.gyro_rms.median()), 5), acc_rms=round(float(m.acc_rms.median()), 4), max_rads=round(float(m.max_rads.median()), 4),
+                        settle_s=round(float(m.settle_s.median()), 2), settle_cmd_s=round(float(m.settle_cmd_s.median()), 2), t_stop_ms=round(float(m.t_stop_ms.median())),
+                        f_fit=round(float(ok.f_fit.median()), 2) if len(ok) else "", zeta_fit=round(float(ok.zeta_fit.median()), 3) if len(ok) else "", n_r2=len(ok),
+                        enc_share=round(float(m.enc_share.median()), 3), gap_max_ms=round(float(m.gap_max_ms.max()), 1), gap_frac=round(float(m.gap_frac.median()), 3)))
+    return out
+
+
+def judge(tr):  # 성형 없음 대비 비와 판정 — 자이로·가속도 둘 다 0.83 이하면 감소, 하나라도 1.2 이상이면 증가, 시행 범위가 겹치면 경향(9절 11/17 6번)
+    d = pd.DataFrame(tr); d = d[d.speed_dps != ""]
+    if d.empty or d["shape"].nunique() < 2 or "none" not in set(d["shape"]):
+        return
+    mr = lambda x, n: f"{x.median():.{n}f} ({x.min():.{n}f}–{x.max():.{n}f})"
+    print("\n| 속도 [°/s] | 정지 | 성형 | 시행 수 | 5–10 Hz 자이로 rms [rad/s] | 비 | 가속도 rms [m/s²] | 비 | 창 최대 [rad/s] | 정착 [s] | 명령 정지부터 정착 [s] | f [Hz] | 판정 |")
+    print("|" + "---|" * 13)
+    for (v, st), g in d.groupby(["speed_dps", "stop"], sort=True):
+        b = g[g["shape"] == "none"]; r0 = g.iloc[0]
+        where = f"{st} ({UPDOWN.get(r0.arrive, r0.arrive)}, {r0.stop_deg:g}°)"
+        for sh in ("none", "zv", "zvd"):
+            m = g[g["shape"] == sh]
+            if m.empty:
+                continue
+            rg = m.gyro_rms.median() / b.gyro_rms.median(); ra = m.acc_rms.median() / b.acc_rms.median()
+            lap = m.gyro_rms.max() >= b.gyro_rms.min() and m.gyro_rms.min() <= b.gyro_rms.max()  # 시행 범위가 겹치는지(자이로)
+            if sh == "none":
+                verdict = "기준"
+            elif rg >= 1.2 or ra >= 1.2:
+                verdict = "증가" + ("(범위 겹침 → 경향)" if lap else "")
+            elif rg <= 0.83 and ra <= 0.83:
+                verdict = "감소" + ("(범위 겹침 → 경향)" if lap else "")
+            else:
+                verdict = "차이 없음"
+            ff = pd.to_numeric(m.f_fit, errors="coerce").dropna()
+            print(f"| {float(v):g} | {where} | {sh} | {len(m)} | {mr(m.gyro_rms, 4)} | {rg:.2f} | {mr(m.acc_rms, 3)} | {ra:.2f} | {mr(m.max_rads, 3)} | {mr(m.settle_s, 2)} | {mr(m.settle_cmd_s, 2)} | "
+                  + (f"{ff.median():.2f}" if len(ff) else "—") + f" | {verdict} |")
 
 
 def main():
@@ -201,6 +257,8 @@ def main():
     ap.add_argument("--summary", action="store_true", help="조건(속도·거리·방향)별 중앙값(최소–최대) 표를 마크다운으로")
     ap.add_argument("--all", action="store_true", help="왕복의 돌아간 쪽 정지(bhold)도 분석")
     ap.add_argument("--out", default="", help="결과 CSV")
+    ap.add_argument("--trial-out", default="", help="시행(기록)별 중앙값 CSV — 왕복 기록의 정지 창들을 hold·bhold마다 하나로")
+    ap.add_argument("--judge", action="store_true", help="성형 조건별 시행 중앙값(범위)과 성형 없음 대비 비·판정 표를 마크다운으로")
     ap.add_argument("--plot", default="", help="현상 그림 PNG(첫 기록의 첫 정지)")
     a = ap.parse_args()
     try:
@@ -214,11 +272,11 @@ def main():
         if p.endswith((".imu.csv", ".gq7.csv")):
             continue
         r, f = analyze(p, a, kin_tb); rows += r; fig = fig or f
-    print("기록 | 관절 속도 거리 | 기울기 | 도달 속도[°/s] 정지 지연[ms] | 축 창 최대[rad/s] (첫 봉우리@ms) | 5–10 Hz 자이로·각가속도·가속도 | f[Hz] ζ(R²) | 정착[s] 명령 정지부터[s] | 엔코더 몫")
+    print("기록 | 관절 속도 거리 | 기울기 | 도달 속도[°/s] 정지 지연[ms] | 축 창 최대[rad/s] (첫 봉우리@ms) | 5–10 Hz 자이로·각가속도·가속도 | f[Hz] ζ(R²) | 정착[s] 명령 정지부터[s] | 엔코더 몫 | IMU 빈틈(자이로, 창 안)")
     for r in rows:
-        print(f"{r['file'][:15]} {r['stop']} | J{r['joint']} {r['speed_dps']} {r['dist_deg']} | {r['tilt_deg']:.2f}° | {r['v_enc_dps']:+.1f} {r['t_stop_ms']} | "
+        print(f"{r['file'][:15]} {r['stop']}{r['rep']} {r['shape']} {UPDOWN.get(r['arrive'], '')} {r['stop_deg']:g}° | J{r['joint']} {r['speed_dps']} {r['dist_deg']} | {r['tilt_deg']:.2f}° | {r['v_enc_dps']:+.1f} {r['t_stop_ms']} | "
               f"{r['axis']} {r['max_rads']:.4f} ({r['peak1_rads']:+.4f}@{r['t_peak1_ms']}) | {r['gyro_rms']:.4f} {r['angacc_rms']:.3f} {r['acc_rms']:.3f}({r['acc_axis']}) | "
-              f"{r['f_fit']:.2f} {r['zeta_fit']:.3f}({r['r2']:.2f}) | {r['settle_s']} {r['settle_cmd_s']} | {r['enc_share']}")
+              f"{r['f_fit']:.2f} {r['zeta_fit']:.3f}({r['r2']:.2f}) | {r['settle_s']} {r['settle_cmd_s']} | {r['enc_share']} | 빈틈 {r['gap_n']}개 {100 * r['gap_frac']:.0f}% 최대 {r['gap_max_ms']:.0f} ms")
     if rows:
         ok = [r for r in rows if r["r2"] >= 0.8]  # 주파수·감쇠비 통계는 맞춤이 된 시행만
         if ok:
@@ -227,6 +285,12 @@ def main():
         print(f"엔코더 정지 정의: {'(가) 0.1 s 이어진 첫 시각' if a.sustained else '(나) 처음 내려간 시각'} | 정착 바닥: {('고정 %.4f rad/s' % a.floor) if a.floor > 0 else '기록별'}")
     if a.summary and rows:
         summary(rows)
+    if rows and (a.trial_out or a.judge):
+        tr = trials(rows)
+        if a.trial_out:
+            os.makedirs(os.path.dirname(os.path.abspath(a.trial_out)), exist_ok=True); pd.DataFrame(tr).to_csv(a.trial_out, index=False); print("시행별 표:", a.trial_out)
+        if a.judge:
+            judge(tr)
     if a.out and rows:
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
         with open(a.out, "w", newline="") as f:

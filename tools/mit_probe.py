@@ -114,7 +114,7 @@ class Probe:
                 self.ext_kd[j] = 0.0
             f = open(self.path.replace(".csv", ".tdc.csv" if j == a.joint - 1 else f".tdc{j + 1}.csv"), "w", newline="")
             self.tdc_files.append(f); self.tws[j] = csv.writer(f)
-            self.tws[j].writerow(["t", "e", "ed", "qdd_f", "ar", "tau_prev", "tde", "pd", "sw", "tau", "K", "eta"])
+            self.tws[j].writerow(["t", "e", "ed", "qdd_f", "ar", "tau_prev", "tde", "pd", "sw", "tau", "K", "eta", "tau_raw", "lim"])
             if j == a.joint - 1:
                 self.tdc = f
 
@@ -195,6 +195,8 @@ class Probe:
                     if a.asmc else "")
                  + (f" | ASMC-2016 φ {a.phi}, α {a.alpha}, ε {a.eps}, K̂ 상한 {a.k_max} (M̄K̂ {a.mbar * a.k_max:.3f} N·m), "
                     + (f"sat φ {a.sw_phi}" if a.sw_phi else "sgn") if a.asmc16 else "") if a.tdc else ""))
+        if a.tdc and a.tau_rate:
+            print(f"추종층 토크 변화율 제한: 주기당 ±{a.tau_rate} N·m(관절마다, 포화 뒤 적용, TDE의 직전 토크는 제한을 거친 송신값)")
         if len(self.tj) > 1:
             print("추종층 관절: " + ", ".join(f"J{j + 1} M̄ {self.mb[j]}" for j in self.tj) + " (나머지 설정은 공통, 처프·τ_vib 경로는 --joint만)")
         if not a.go:
@@ -253,6 +255,7 @@ class Probe:
                                      dist_comp=(lambda o: dist_now["v"]) if j == j6 and a.joint in (a.chirp_joint, a.vib_joint) else None)
         same = bool(a.chirp_joint and a.chirp_joint == a.vib_joint)  # 처프 + τ_vib 같은 관절: 합에 포화(8절 10/26 밤 2)
         dist_now = {"v": 0.0}; self.n_sat = 0; k_switched = False
+        tau_last = {j: float(tff[j]) for j in self.tj}; self.n_lim = {j: 0 for j in self.tj}; self.n_cyc = 0  # 변화율 제한 기준 = 직전 송신값(첫 주기는 유지 토크)
         vd = None; tds = []
         if a.vib_joint:
             from imu_frame import ImuToBase
@@ -340,12 +343,16 @@ class Probe:
                     tj = tau[a.vib_joint - 1]; tv = self.vib_now["v"]
                     vd.note_sum_sat((same and sum_sat) or (abs(tj) >= TAU_CMD_LIMIT and abs(tj - tv) < TAU_CMD_LIMIT))
                 tau = np.clip(tau, -TAU_CMD_LIMIT, TAU_CMD_LIMIT)
+            self.n_cyc += 1
             for j in self.tj:
-                co = cos[j]
+                co = cos[j]; raw = float(tau[j]); lim = 0
+                if a.tau_rate and abs(raw - tau_last[j]) > a.tau_rate:  # 변화율 제한(9절 11/17 22:04) — 튐 뒤 TDE 반응(주기당 1 N·m 이상)만 깎음
+                    tau[j] = tau_last[j] + math.copysign(a.tau_rate, raw - tau_last[j]); lim = 1; self.n_lim[j] += 1
+                tau_last[j] = float(tau[j])
                 self.tws[j].writerow([f"{now - self.t0:.4f}", f"{co['e']:.6f}", f"{co['ed']:.5f}", f"{co['qdd_f']:.4f}", f"{arv[j]:.5f}",
                                       f"{co['tau_prev']:.4f}", f"{co['tde']:.4f}", f"{co['pd']:.4f}", f"{co['sw']:.4f}", f"{tau[j]:.4f}",
-                                      f"{co['K']:.3f}", f"{co['eta']:.2f}"])
-                ctrls[j].commit(tau[j])  # 포화 후 값 — 실제 보낸 토크로 다음 TDE
+                                      f"{co['K']:.3f}", f"{co['eta']:.2f}", f"{raw:.4f}", lim])
+                ctrls[j].commit(tau[j])  # 포화·변화율 제한 후 값 — 실제 보낸 토크로 다음 TDE
             for j in range(6):
                 p.JointMitCtrl(j + 1, float(qr[j]), float(vr[j]), float(self.kp[j]), float(self.kd[j]), float(tau[j]) + TAU_STEP / 2)
             if plan is not None and vo is not None:
@@ -390,6 +397,8 @@ class Probe:
                 json.dump(dict(plan=a.plan, lead=plan.lead, lead_ok=plan.lead_ok, k_cap=plan.k_cap, k_ok=plan.k_ok, results=plan.results), fj, ensure_ascii=False, indent=1)
             print(f"[계획] 요약: k_ok {plan.k_ok}(φ_lead {plan.lead_ok if plan.lead_ok is None else round(plan.lead_ok)}°로 on/off) → {self.path.replace('.csv', '.plan.json')}", flush=True)
         self.spikes = self.spike_n  # 순간 튐: 1주기라도 속도 한계 초과
+        if a.tdc and a.tau_rate:
+            print(f"변화율 제한(±{a.tau_rate} N·m)에 걸린 주기: " + ", ".join(f"J{j + 1} {self.n_lim[j]}" for j in self.tj) + f" / {self.n_cyc}주기")
         print(f"루프 멈춤 30 ms 초과 {getattr(self, 'n_gap30', 0)}회 (최대 {getattr(self, 'gap_max', 0.0) * 1000:.0f} ms) — 수십 회면 원인 확인(8절 10/26 밤 7)")
         if tds:
             td = np.array(tds); self.td_stats = (f"Td(자이로 표본 → τ_vib 송신, 하한) 중앙 {np.median(td):.1f} ms · 95% {np.percentile(td, 95):.1f} · 최대 {td.max():.1f}"
@@ -617,6 +626,7 @@ def main():
     ap.add_argument("--mbar", type=float, default=0.005, help="TDC 관성 추정 M̄[kg·m²] — 작게 시작해서 키움")
     ap.add_argument("--tdc-joints", type=int, nargs="+", default=None, help="추종층(TDC)을 동시에 걸 관절들(1–3, --joint 포함) — 없으면 --joint 하나")
     ap.add_argument("--mbars", type=float, nargs="+", default=None, help="--tdc-joints 순서대로 관절별 M̄ — 없으면 모두 --mbar")
+    ap.add_argument("--tau-rate", type=float, default=0.0, help="추종층 관절 토크의 주기당 변화 상한[N·m], 0이면 끔 — 9절 11/17: 0.3(튐 창 밖에서 걸리면 0.5)")
     ap.add_argument("--ks", type=float, default=20.0, help="TDC 극점 Ks[1/s]")
     ap.add_argument("--kg", type=float, default=20.0, help="TDC 극점 Kg[1/s]")
     ap.add_argument("--sw-k", type=float, default=0.0, help="TDC 스위칭 게인 K[rad/s²] — 0이면 TDC만, M̄·K가 최대 보정 토크")
@@ -699,6 +709,8 @@ def main():
             raise SystemExit("--mbars: --tdc-joints와 같은 개수, 각 0.02 이하")
     elif a.mbars:
         raise SystemExit("--mbars는 --tdc-joints와 같이")
+    if a.tau_rate and (not a.tdc or not 0.1 <= a.tau_rate <= 2.0 or a.chirp_joint or a.vib_joint):
+        raise SystemExit("--tau-rate: --tdc 필요, 0.1–2.0 N·m, 처프·τ_vib와는 같이 쓰지 않음(그 토크까지 깎임)")
     if abs(a.vib_lead_deg) > 180:
         raise SystemExit("φ_lead는 ±180° 안(8절 10/27 오전 4: 상한 없음, 1–5 Hz |L| 확인 조건)")
     if a.vib_joint and ((a.chirp_joint and a.chirp_joint != a.vib_joint) or a.vib_max > 0.5 or a.vib_sum_max > 0.5
