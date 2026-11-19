@@ -70,6 +70,7 @@ def read_state(p):  # → q[rad], qd[rad/s], eff[N·m], enable[6], (arm_status, 
 class Probe:
     def __init__(self, p, a):
         self.p, self.a = p, a
+        self.tau_lim = np.full(6, TAU_CMD_LIMIT); self.tau_lim[1] = a.j2_tau_limit  # 명령 상한(관절별) — J2만 --j2-tau-limit(11/19 다한 승인)
         self.kp = np.array(a.kp, float); self.kd = np.array(a.kd, float)
         self.ext_kp = None if a.ext_kp is None else np.array(a.ext_kp, float)
         if self.ext_kp is not None:
@@ -225,6 +226,7 @@ class Probe:
                  + (f" | ASMC-2016 φ {a.phi}, α {a.alpha}, ε {a.eps}, K̂ 상한 {a.k_max} (M̄K̂ {a.mbar * a.k_max:.3f} N·m), "
                     + (f"sat φ {a.sw_phi}" if a.sw_phi else "sgn") if a.asmc16 else "") if a.tdc else ""))
         if a.tdc and a.tau_rate:
+            print(f"추종층 토크 상한: J2 ±{a.j2_tau_limit:g} N·m, 그 밖 ±{TAU_CMD_LIMIT:g} N·m")
             print(f"추종층 토크 변화율 제한: 주기당 ±{a.tau_rate} N·m(관절마다, 포화 뒤 적용, TDE의 직전 토크는 제한을 거친 송신값)")
         if len(self.tj) > 1:
             print("추종층 관절: " + ", ".join(f"J{j + 1} M̄ {self.mb[j]}" for j in self.tj) + " (나머지 설정은 공통, 처프·τ_vib 경로는 --joint만)")
@@ -378,8 +380,8 @@ class Probe:
             if self.ext_kp is not None or self.ext_kd is not None or self.tdc is not None or a.chirp_joint or a.vib_joint:
                 if vd is not None:  # 감시 ①a: 처프 + τ_vib 합 포화, 또는 τ_vib가 없었으면 안 닿았을 명령 상한(TDE 혼자 튐에 닿는 것은 뺌)
                     tj = tau[a.vib_joint - 1]; tv = self.vib_now["v"]
-                    vd.note_sum_sat((same and sum_sat) or (abs(tj) >= TAU_CMD_LIMIT and abs(tj - tv) < TAU_CMD_LIMIT))
-                tau = np.clip(tau, -TAU_CMD_LIMIT, TAU_CMD_LIMIT)
+                    lv = self.tau_lim[a.vib_joint - 1]; vd.note_sum_sat((same and sum_sat) or (abs(tj) >= lv and abs(tj - tv) < lv))
+                tau = np.clip(tau, -self.tau_lim, self.tau_lim)
             self.n_cyc += 1
             for j in self.tj:
                 co = cos[j]; raw = float(tau[j]); lim = 0
@@ -673,6 +675,7 @@ def main():
     ap.add_argument("--tdc-joints", type=int, nargs="+", default=None, help="추종층(TDC)을 동시에 걸 관절들(1–3, --joint 포함) — 없으면 --joint 하나")
     ap.add_argument("--mbars", type=float, nargs="+", default=None, help="--tdc-joints 순서대로 관절별 M̄ — 없으면 모두 --mbar")
     ap.add_argument("--tau-rate", type=float, default=0.0, help="추종층 관절 토크의 주기당 변화 상한[N·m], 0이면 끔 — 9절 11/17: 0.3(튐 창 밖에서 걸리면 0.5)")
+    ap.add_argument("--j2-tau-limit", type=float, default=TAU_CMD_LIMIT, help="J2 명령 토크 상한[N·m], 4–5 — 올림 출발에서 4에 닿아 11/19부터 5(다른 관절은 4 그대로)")
     ap.add_argument("--ks", type=float, default=20.0, help="TDC 극점 Ks[1/s]")
     ap.add_argument("--kg", type=float, default=20.0, help="TDC 극점 Kg[1/s]")
     ap.add_argument("--sw-k", type=float, default=0.0, help="TDC 스위칭 게인 K[rad/s²] — 0이면 TDC만, M̄·K가 최대 보정 토크")
@@ -759,6 +762,8 @@ def main():
         raise SystemExit("--stage ramp: --joint 1–3, 거리 15° 이하, 속도 15°/s 이하(20°/s는 위치 모드에서도 등속 불가), --speed-err 필요, 처프·계획과 같이 쓰지 않음")
     if a.tau_rate and (not a.tdc or not 0.1 <= a.tau_rate <= 2.0 or a.chirp_joint or a.vib_joint):
         raise SystemExit("--tau-rate: --tdc 필요, 0.1–2.0 N·m, 처프·τ_vib와는 같이 쓰지 않음(그 토크까지 깎임)")
+    if not TAU_CMD_LIMIT <= a.j2_tau_limit <= 5.0:
+        raise SystemExit("--j2-tau-limit: 4–5 N·m")
     if abs(a.vib_lead_deg) > 180:
         raise SystemExit("φ_lead는 ±180° 안(8절 10/27 오전 4: 상한 없음, 1–5 Hz |L| 확인 조건)")
     if a.vib_joint and ((a.chirp_joint and a.chirp_joint != a.vib_joint) or a.vib_max > 0.5 or a.vib_sum_max > 0.5
@@ -830,7 +835,7 @@ def main():
         ctrl = "pd" if not a.tdc else ("asmc16" if a.asmc16 else "asmc" if a.asmc else "tde") + ("_j" + "".join(map(str, a.tdc_joints)) if a.tdc_joints and len(a.tdc_joints) > 1 else "")
         with open(pr.path.replace(".csv", ".meta.json"), "w") as f:
             json.dump({"stage": "ramp", "mode": "mit", "ctrl": ctrl, "fw": getattr(a, "fw", "fake"), "sdk": getattr(a, "sdk", "fake"), "go": a.go, "fake": a.fake, "note": a.note, "result": res, "t0": pr.t0,
-                       "tau_rate": a.tau_rate, "n_lim": {str(j + 1): n for j, n in getattr(pr, "n_lim", {}).items()}, "n_cyc": getattr(pr, "n_cyc", 0),
+                       "tau_rate": a.tau_rate, "tau_limit": [TAU_CMD_LIMIT, a.j2_tau_limit, TAU_CMD_LIMIT, TAU_CMD_LIMIT, TAU_CMD_LIMIT, TAU_CMD_LIMIT], "n_lim": {str(j + 1): n for j, n in getattr(pr, "n_lim", {}).items()}, "n_cyc": getattr(pr, "n_cyc", 0),
                        "args": {k: v for k, v in vars(a).items() if k not in ("fw", "sdk")}}, f, ensure_ascii=False, indent=1)
     print(f"결과: {res}\n기록: {pr.path}" + (f"\nIMU: {pr.path.replace('.csv', '.imu.csv')}" if pr.imu else "") + (f"\nCAN 원본: {pr.path.replace('.csv', '.candump')}" if pr.dump else ""))
     if getattr(pr, "td_stats", None):

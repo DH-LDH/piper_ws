@@ -6,7 +6,7 @@
       tde   MIT, 추종층 TDE(J2 하이브리드, M̄ 0.01)(②)
       asmc  MIT, TDE + ASMC16(ε 0.08)(④-off)
       asmc3 MIT, asmc를 J1+J2+J3에 동시에
-      MIT 추종층 조건은 모두 --tau-rate(기본 0.3 N·m). MIT 시행은 끝나면 비상 정지로 내려앉으므로 run은 한 번에 한 시행만 하고 끝난다 → 복구 뒤 같은 명령을 다시 실행.
+      MIT 추종층 조건은 모두 --tau-rate(기본 0.3 N·m), J2 토크 상한은 make --j2-tau-limit(목록의 j2_lim 열, 기본 4). MIT 시행은 끝나면 비상 정지로 내려앉으므로 run은 한 번에 한 시행만 하고 끝난다 → 복구 뒤 같은 명령을 다시 실행.
 make: 조건 × 블록 수, 블록마다 순서를 섞어 목록 CSV로.  run: 다음 시행 하나를 실행하고 결과·기록 파일을 목록에 적는다. 정상 종료가 아니면 그 시행을 다음에 다시 한다(시도 수를 적음).
 재측정: MIT 시행이 끝나면 튐이 안 겹친 정지 창 수를 방향별로 세고, 3개 미만이면 같은 블록 끝에 그 조건을 한 번 더 넣는다(9절 11/17 22:04 8번, retake_of 열에 원래 idx). 재측정의 재측정은 하지 않는다. --no-retake로 끔.
 사용: python3 tools/mit_trials.py make docs/data/trials_d1b_v10.csv --speed 10 --conds pos pd tde asmc asmc3 --reps 5
@@ -22,7 +22,7 @@ import time
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 POSE_A = [-0.3, 121.1, -73.2, 1.6, 52.0, 13.7]
-COLS = ["idx", "block", "cond", "joint", "speed", "dist", "round_reps", "status", "tries", "time", "file", "result", "retake_of"]
+COLS = ["idx", "block", "cond", "joint", "speed", "dist", "round_reps", "status", "tries", "time", "file", "result", "retake_of", "j2_lim"]
 MIT = {"pd": [], "tde": ["--tdc", "--hybrid", "--mbar", "0.01", "--dist-mode", "torque"],
        "asmc": ["--tdc", "--hybrid", "--mbar", "0.01", "--dist-mode", "torque", "--asmc16", "--eps", "0.08"],
        "asmc3": ["--tdc", "--hybrid", "--mbar", "0.01", "--dist-mode", "torque", "--asmc16", "--eps", "0.08", "--tdc-joints", "1", "2", "3"]}
@@ -46,9 +46,9 @@ def make(a):
     for b in range(a.reps):
         order = a.conds[:]; rng.shuffle(order)
         for c in order:
-            rows.append(dict(idx=len(rows) + 1, block=b + 1, cond=c, joint=a.joint, speed=f"{a.speed:g}", dist=f"{a.dist:+g}", round_reps=a.round_reps, status="", tries=0, time="", file="", result="", retake_of=""))
+            rows.append(dict(idx=len(rows) + 1, block=b + 1, cond=c, joint=a.joint, speed=f"{a.speed:g}", dist=f"{a.dist:+g}", round_reps=a.round_reps, status="", tries=0, time="", file="", result="", retake_of="", j2_lim=f"{a.j2_tau_limit:g}"))
     os.makedirs(os.path.dirname(os.path.abspath(a.plan)), exist_ok=True); write(a.plan, rows)
-    print(f"목록 {a.plan}: 조건 {len(a.conds)}개 × {a.reps}블록 = {len(rows)}시행 (seed {a.seed})")
+    print(f"목록 {a.plan}: 조건 {len(a.conds)}개 × {a.reps}블록 = {len(rows)}시행 (seed {a.seed}), J2 토크 상한 {a.j2_tau_limit:g} N·m")
     for b in range(a.reps):
         print(f"  블록 {b + 1}: " + " → ".join(r["cond"] for r in rows if r["block"] == b + 1))
 
@@ -72,7 +72,7 @@ def command(r, a):
         cmd = [sys.executable, os.path.join(TOOLS, "vib_probe.py"), "--stage", "ramp", "--joint", r["joint"], "--speed", r["speed"], "--dist=" + r["dist"], "--round", "--reps", r["round_reps"], "--note", note] + ex
     else:
         cmd = [sys.executable, os.path.join(TOOLS, "mit_probe.py"), "--stage", "ramp", "--joint", r["joint"], "--speed", r["speed"], "--dist=" + r["dist"], "--reps", r["round_reps"], "--hold", "2",
-               "--speed-err", "--dev-limit", "6", "--speed-consec", "10", "--note", note] + ex + MIT[r["cond"]] + (["--tau-rate", f"{a.tau_rate:g}"] if MIT[r["cond"]] else [])
+               "--speed-err", "--dev-limit", "6", "--speed-consec", "10", "--note", note] + ex + MIT[r["cond"]] + (["--tau-rate", f"{a.tau_rate:g}", "--j2-tau-limit", r.get("j2_lim") or "4"] if MIT[r["cond"]] else [])
     return cmd + [f for f, on in (("--imu", a.imu), ("--fake", a.fake), ("--go", a.go)) if on]
 
 
@@ -118,6 +118,7 @@ def main():
     m.add_argument("--joint", type=int, default=2); m.add_argument("--speed", type=float, default=10.0); m.add_argument("--dist", type=float, default=10.0)
     m.add_argument("--conds", nargs="+", choices=["pos", "pd", "tde", "asmc", "asmc3"], default=["pos", "pd", "tde", "asmc", "asmc3"])
     m.add_argument("--reps", type=int, default=5, help="블록 수(블록마다 조건이 한 번씩)"); m.add_argument("--round-reps", type=int, default=6)
+    m.add_argument("--j2-tau-limit", type=float, default=4.0, help="MIT 추종층 조건의 J2 명령 토크 상한[N·m] — 목록에 적어 두고 시행마다 그대로 씀")
     m.add_argument("--seed", type=int, default=1); m.add_argument("--force", action="store_true")
     r = sp.add_parser("run"); r.add_argument("plan")
     r.add_argument("--go", action="store_true"); r.add_argument("--fake", action="store_true"); r.add_argument("--imu", action="store_true")

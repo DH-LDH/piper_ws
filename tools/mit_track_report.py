@@ -8,6 +8,7 @@
 사용: python3 tools/mit_track_report.py logs/mit/20261118_*_sine.csv
 """
 import glob
+import json
 import os
 import sys
 
@@ -22,6 +23,7 @@ J = range(1, 7)
 
 
 def report(p):
+    mp = p.replace(".csv", ".meta.json"); lims = (json.load(open(mp)).get("tau_limit") if os.path.exists(mp) else None) or [TAU_CMD_LIMIT] * 6  # 관절별 명령 상한(11/19부터 J2만 5 N·m인 기록이 있음)
     d = pd.read_csv(p); m = d[d.phase == "mit"].reset_index(drop=True); t = m.t.values; tm = t - t[0]
     qr = m[[f"qref{j}" for j in J]].values; dev = m[[f"q{j}" for j in J]].values - qr; tff = m[[f"tff{j}" for j in J]].values
     mv = np.where(np.abs(qr - qr[0]).max(1) > 1e-3)[0]
@@ -42,8 +44,8 @@ def report(p):
         x = dev[:, j - 1]; a = f"   J{j}{'*' if j in ours else ' '} | {rms(x[sec]):.3f} / {rms(x[sec & ~old]):.3f} / {rms(x[sec & ~new]):.3f} | {np.abs(x[sec]).max():.2f} / " \
             + (f"{np.abs(x[sec & ~new]).max():.2f}" if (sec & ~new).any() else "—")
         if j in ours:
-            tau = tff[:, j - 1]; dt_ = np.abs(np.diff(tau)); k = ~new[1:] & ~new[:-1] & (tm[1:] > 0.5)
-            a += f" | {tau.min():+.2f}–{tau.max():+.2f} | {int((np.abs(tau) >= TAU_CMD_LIMIT - 1e-3).sum())}(창 밖 {int(((np.abs(tau) >= TAU_CMD_LIMIT - 1e-3) & ~new).sum())}) | {dt_.max():.3f}({dt_[k].max() if k.any() else float('nan'):.3f})"
+            tau = tff[:, j - 1]; dt_ = np.abs(np.diff(tau)); L = lims[j - 1]; k = ~new[1:] & ~new[:-1] & (tm[1:] > 0.5)
+            a += f" | {tau.min():+.2f}–{tau.max():+.2f} | {int((np.abs(tau) >= L - 1e-3).sum())}(창 밖 {int(((np.abs(tau) >= L - 1e-3) & ~new).sum())}, 상한 {L:g}) | {dt_.max():.3f}({dt_[k].max() if k.any() else float('nan'):.3f})"
             f = files.get(str(j)) or (files.get("") if j in main_j else None)
             if f:
                 c = pd.read_csv(f)
@@ -57,7 +59,7 @@ def report(p):
     for j in ours:  # 정지 구간에서 토크가 수렴한 값(9절 11/18 22번 — 상한까지의 여유가 처짐 상태에 따라 달라지는지)
         still = np.abs(np.gradient(qr[:, j - 1], tm)) < 1e-3
         if (still & (tm > 1.0)).sum() > 20:
-            x = tff[still & (tm > 1.0), j - 1]; print(f"   J{j} 정지 구간 토크 중앙 {np.median(x):+.2f} N·m (범위 {x.min():+.2f}–{x.max():+.2f}), 상한까지 여유 {TAU_CMD_LIMIT - np.abs(x).max():.2f}")
+            x = tff[still & (tm > 1.0), j - 1]; print(f"   J{j} 정지 구간 토크 중앙 {np.median(x):+.2f} N·m (범위 {x.min():+.2f}–{x.max():+.2f}), 상한 {lims[j - 1]:g}까지 여유 {lims[j - 1] - np.abs(x).max():.2f}")
     print(f"   끝: 마지막 구간 {last}, MIT 마지막 표본 이탈 최대 {np.abs(dev[-1]).max():.2f}°")
 
 
