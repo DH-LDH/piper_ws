@@ -34,19 +34,31 @@ MODE_GRACE_S = 0.2        # MIT 전환 후 모드 피드백이 MOVE M(4)이 될 
 LOG_ROOT = os.path.expanduser("~/piper_ws/logs/mit")
 
 
-def ramp_segs(a, A):  # 등속 후 정지 왕복(단계 D, vib_probe --stage ramp --round와 같은 구간 이름) — A: 멈추는 각[rad] → [(이름, 시간, 시작각, 끝각, 모양)]
+def shaper(kind, f, zeta):  # 입력 성형기 임펄스열 [(크기, 시각 s)] — vib_probe.shaper와 같은 식(K = exp(−ζπ/√(1−ζ²)), 간격은 감쇠 주기의 절반)
+    if kind == "none":
+        return [(1.0, 0.0)]
+    r = math.sqrt(1 - zeta * zeta); K = math.exp(-zeta * math.pi / r); half = 0.5 / (f * r)
+    amp = [1.0, K] if kind == "zv" else [1.0, 2 * K, K * K]
+    return [(x / sum(amp), i * half) for i, x in enumerate(amp)]
+
+
+def ramp_segs(a, A):  # 등속 후 정지 왕복(단계 D, vib_probe --stage ramp --round와 같은 구간 이름) — A: 멈추는 각[rad] → [(이름, 시간, 시작각, 끝각, 모양[, 등속 시간])]
     S = A - math.radians(a.dist); d = abs(a.dist); Tc = max(0.5, math.pi / 2 * d / a.pre_vmax); Tl = d / a.speed
+    D = shaper(a.shape, a.shape_f, a.shape_zeta)[-1][1]  # 성형하면 등속 구간이 D만큼 길어지고 유지는 성형된 기준이 멈춘 뒤 시작(vib_probe와 같음)
     segs = [("pre", Tc, A, S, "cos"), ("wait", a.pre_hold, S, S, "hold")]
     for _ in range(a.reps):
-        segs += [("ramp", Tl, S, A, "lin"), ("hold", a.stop_hold, A, A, "hold"), ("back", Tl, A, S, "lin"), ("bhold", a.stop_hold, S, S, "hold")]
+        segs += [("ramp", Tl + D, S, A, "lin", Tl), ("hold", a.stop_hold, A, A, "hold"), ("back", Tl + D, A, S, "lin", Tl), ("bhold", a.stop_hold, S, S, "hold")]
     return segs + [("post", Tc, S, A, "cos"), ("end", 1.0, A, A, "hold")]
 
 
-def ramp_at(segs, tt):  # → (구간 이름, 각, 속도, 가속도) — 등속 구간의 기준 가속도는 0(양 끝의 속도 계단은 TDE가 받는다)
-    for name, T, qa, qb, kind in segs:
+def ramp_at(segs, tt, imp=((1.0, 0.0),)):  # → (구간 이름, 각, 속도, 가속도) — 등속 구간의 기준 가속도는 0(양 끝의 속도 계단은 TDE가 받는다), imp = 성형 임펄스열
+    for name, T, qa, qb, kind, *x in segs:
         if tt < T:
-            if kind == "lin":
-                return name, qa + (qb - qa) * tt / T, (qb - qa) / T, 0.0
+            if kind == "lin":  # 등속 기준을 임펄스열과 합성 — 성형 없으면 임펄스 하나(1, 0)라 원래 식과 같음
+                q = qa; v = 0.0; Tl = x[0]
+                for ai, ti in imp:
+                    q += ai * (qb - qa) * min(1.0, max(0.0, (tt - ti) / Tl)); v += ai * (qb - qa) / Tl if 0.0 <= tt - ti < Tl else 0.0
+                return name, q, v, 0.0
             if kind == "cos":
                 w = math.pi / T
                 return name, qa + (qb - qa) * (1 - math.cos(w * tt)) / 2, (qb - qa) * w / 2 * math.sin(w * tt), (qb - qa) * w * w / 2 * math.cos(w * tt)
@@ -79,7 +91,7 @@ class Probe:
         if self.ext_kd is not None:
             self.kd = np.zeros(6)  # 펌웨어 감쇠 항도 끔 — 10-20 펌웨어 Kp 0에서도 J6 튐, 모터엔 우리 토크만
         os.makedirs(LOG_ROOT, exist_ok=True)
-        tag = time.strftime("%Y%m%d_%H%M%S") + ("_plan" if a.plan else f"_{a.stage}") + (f"_j{a.joint}_v{a.speed:g}_d{a.dist:+g}_r{a.reps}" if a.stage == "ramp" else "") \
+        tag = time.strftime("%Y%m%d_%H%M%S") + ("_plan" if a.plan else f"_{a.stage}") + (f"_j{a.joint}_v{a.speed:g}_d{a.dist:+g}" + (f"_{a.shape}" if a.shape != "none" else "") + f"_r{a.reps}" if a.stage == "ramp" else "") \
             + (f"_{a.note}" if a.note else "") + ("_fake" if a.fake else "") + ("" if a.go else "_dry")
         self.path = os.path.join(LOG_ROOT, tag + ".csv")
         self.f = open(self.path, "w", newline="")
@@ -237,6 +249,8 @@ class Probe:
             if a.stage == "ramp":
                 sg = ramp_segs(a, q_hold[a.joint - 1]); A = math.degrees(q_hold[a.joint - 1])
                 print(f"[dry-run] J{a.joint} 등속 후 정지 왕복: {A:.2f}° ↔ {A - a.dist:.2f}°, {a.speed:g}°/s × {abs(a.dist):g}°, 정지 후 {a.stop_hold:g} s, {a.reps}회 → MIT {a.hold + sum(x[1] for x in sg):.1f} s")
+                if a.shape != "none":
+                    print(shape_text(a))
             if a.stage == "sine":
                 print(f"[dry-run] J{a.joint} 사인파: ±{a.amp}° {a.hz} Hz, {a.cycles}주기, 진폭 2 s 램프 → q_ref 범위 "
                       f"{np.degrees(q_hold[a.joint - 1]) - a.amp:.1f} ~ {np.degrees(q_hold[a.joint - 1]) + a.amp:.1f}°")
@@ -269,8 +283,8 @@ class Probe:
         hold_s = a.hold
         dur = hold_s + (a.cycles / a.hz + 2.0 if a.stage == "sine" else 0.0)
         if a.stage == "ramp":
-            self.segs = ramp_segs(a, q_hold[a.joint - 1]); dur = hold_s + sum(x[1] for x in self.segs); self.seg = "lead"
-            print(f"J{a.joint} 등속 후 정지 왕복 {a.speed:g}°/s × {abs(a.dist):g}° × {a.reps}회, MIT {dur:.1f} s", flush=True)
+            self.segs = ramp_segs(a, q_hold[a.joint - 1]); dur = hold_s + sum(x[1] for x in self.segs); self.seg = "lead"; self.imp = shaper(a.shape, a.shape_f, a.shape_zeta)
+            print(f"J{a.joint} 등속 후 정지 왕복 {a.speed:g}°/s × {abs(a.dist):g}° × {a.reps}회, MIT {dur:.1f} s" + ("" if a.shape == "none" else "\n" + shape_text(a)), flush=True)
         plan = None
         if a.plan:  # (가) 한 시행 안 계획 — 길이·처프·a′·k를 계획이 정함(8절 10/27 오후 8–9)
             from vib_plan import Plan, PlanCfg
@@ -322,7 +336,7 @@ class Probe:
                     vr[jj] = A * w * math.cos(w * ts)
                     arv[jj] = -A * w * w * math.sin(w * ts)
             if a.stage == "ramp" and tt > hold_s:
-                self.seg, qr[j6], vr[j6], arv[j6] = ramp_at(self.segs, tt - hold_s)
+                self.seg, qr[j6], vr[j6], arv[j6] = ramp_at(self.segs, tt - hold_s, self.imp)
             pi = None
             if plan is not None:
                 pi = plan.at(tt)
@@ -470,6 +484,13 @@ class Probe:
             time.sleep(dt)
         st = read_state(p)[4]  # V1.7-3: MIT를 빠져나오면 대기(ctrl_mode 0, Enable 유지·자세 유지)로 감, MotionCtrl_2 반복으로도 CAN 제어 복귀 안 됨(10-26)
         return None if st[2] != 0x04 else f"전환 미완료(ctrl_mode {st[1]}, mode_feed {st[2]})"
+
+
+def shape_text(a):  # 성형한 등속 구간의 임펄스와 명령 속도 단(출력용)
+    imp = shaper(a.shape, a.shape_f, a.shape_zeta); Tl = abs(a.dist) / a.speed; ed = sorted({0.0, Tl + imp[-1][1]} | {ti for _, ti in imp} | {ti + Tl for _, ti in imp})
+    lv = [a.speed * sum(ai for ai, ti in imp if ti <= (t1 + t2) / 2 < ti + Tl) for t1, t2 in zip(ed, ed[1:])]
+    return (f"성형 {a.shape.upper()} ({a.shape_f:g} Hz, ζ {a.shape_zeta:g}): 임펄스 " + ", ".join(f"{ai:.3f} @ {ti * 1000:.0f} ms" for ai, ti in imp)
+            + f" | 명령 속도 단[°/s] " + " → ".join(f"{x:.1f}" for x in lv) + f" → 0 | 등속 구간이 {imp[-1][1] * 1000:.0f} ms 길어짐")
 
 
 def chirp(a, tt):  # MIT 진입 뒤 --chirp-start s부터 로그 스윕 f0→f1, --chirp-dur 동안, 앞뒤 0.5 s 진폭 램프 — --vib-k-switch면 전환 뒤 한 번 더
@@ -655,6 +676,9 @@ def main():
     ap.add_argument("--stop-hold", type=float, default=3.0, help="ramp 정지 후 유지[s]")
     ap.add_argument("--pre-vmax", type=float, default=5.0, help="ramp 출발점까지 빼는 최고 속도[deg/s] (코사인)")
     ap.add_argument("--pre-hold", type=float, default=3.0, help="ramp 출발점에서 기다리는 시간[s]")
+    ap.add_argument("--shape", choices=["none", "zv", "zvd"], default="none", help="ramp 등속 구간(돌아가는 구간도) 기준 궤적에 입력 성형 — vib_probe --shape와 같은 식, 예비 동작은 그대로")
+    ap.add_argument("--shape-f", type=float, default=7.0, help="성형 대상 고유 진동수[Hz]")
+    ap.add_argument("--shape-zeta", type=float, default=0.10, help="성형 대상 감쇠비")
     ap.add_argument("--note", default="", help="파일명에 붙일 메모")
     ap.add_argument("--expect", type=float, nargs=6, default=None, help="기대 시작 자세[deg] — 벗어나면 시작하지 않음")
     ap.add_argument("--expect-tol", type=float, default=1.0)
@@ -762,6 +786,8 @@ def main():
         raise SystemExit("--stage ramp: --joint 1–3, 거리 15° 이하, 속도 15°/s 이하(20°/s는 위치 모드에서도 등속 불가), --speed-err 필요, 처프·계획과 같이 쓰지 않음")
     if a.tau_rate and (not a.tdc or not 0.1 <= a.tau_rate <= 2.0 or a.chirp_joint or a.vib_joint):
         raise SystemExit("--tau-rate: --tdc 필요, 0.1–2.0 N·m, 처프·τ_vib와는 같이 쓰지 않음(그 토크까지 깎임)")
+    if a.shape != "none" and (a.stage != "ramp" or not 3.0 <= a.shape_f <= 15.0 or not 0.0 <= a.shape_zeta <= 0.5):
+        raise SystemExit("--shape는 --stage ramp에서만, --shape-f 3–15 Hz, --shape-zeta 0–0.5")
     if not TAU_CMD_LIMIT <= a.j2_tau_limit <= 5.0:
         raise SystemExit("--j2-tau-limit: 4–5 N·m")
     if abs(a.vib_lead_deg) > 180:
@@ -836,7 +862,9 @@ def main():
         with open(pr.path.replace(".csv", ".meta.json"), "w") as f:
             json.dump({"stage": "ramp", "mode": "mit", "ctrl": ctrl, "fw": getattr(a, "fw", "fake"), "sdk": getattr(a, "sdk", "fake"), "go": a.go, "fake": a.fake, "note": a.note, "result": res, "t0": pr.t0,
                        "tau_rate": a.tau_rate, "tau_limit": [TAU_CMD_LIMIT, a.j2_tau_limit, TAU_CMD_LIMIT, TAU_CMD_LIMIT, TAU_CMD_LIMIT, TAU_CMD_LIMIT], "n_lim": {str(j + 1): n for j, n in getattr(pr, "n_lim", {}).items()}, "n_cyc": getattr(pr, "n_cyc", 0),
-                       "args": {k: v for k, v in vars(a).items() if k not in ("fw", "sdk")}}, f, ensure_ascii=False, indent=1)
+                       "args": {k: v for k, v in vars(a).items() if k not in ("fw", "sdk")},
+                       **({} if a.shape == "none" else {"shape": dict(kind=a.shape, f=a.shape_f, zeta=a.shape_zeta, impulses=[[round(ai, 4), round(ti, 4)] for ai, ti in shaper(a.shape, a.shape_f, a.shape_zeta)],
+                                                                      extra_s=round(shaper(a.shape, a.shape_f, a.shape_zeta)[-1][1], 4))})}, f, ensure_ascii=False, indent=1)
     print(f"결과: {res}\n기록: {pr.path}" + (f"\nIMU: {pr.path.replace('.csv', '.imu.csv')}" if pr.imu else "") + (f"\nCAN 원본: {pr.path.replace('.csv', '.candump')}" if pr.dump else ""))
     if getattr(pr, "td_stats", None):
         print(pr.td_stats)

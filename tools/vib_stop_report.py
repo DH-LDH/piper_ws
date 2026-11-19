@@ -7,6 +7,7 @@
 MIT 기록(mit_probe --stage ramp, logs/mit)도 같은 식으로 읽는다: ctrl 열(pos / pd / tde / asmc16 / asmc16_j123), jump 열(창이 MIT 순간 튐의 제외 구간 −0.1–+1.2 s와 겹치면 1 — 시행 집계에서 버림).
 열: shape(.meta.json의 성형 종류), rep(왕복 회차), arrive(도착 방향, +면 관절각이 커지며 도착 — J2는 내림), stop_deg(멈춘 각), gap_*(창 안 자이로 표본 빈틈 수·시간 비율·최대 간격).
 집계: --trial-out 시행(기록)별 중앙값, --judge 성형 없음 대비 비와 판정(자이로·가속도 둘 다 0.83 이하 감소, 하나라도 1.2 이상 증가, 시행 범위 겹치면 경향).
+      --plan 목록.csv(mit_trials 목록)를 주면 판정은 재측정이 있는 시행을 재측정으로 바꿔 넣는다(9절 11/19 29번의 B, 시행 단위). --retake all이면 모두, orig이면 원래 시행만.
 지표: 창 최대(진폭 지표, 20 Hz 저역·창 끝 0.5 s 평균을 뺀 값. 첫 봉우리는 참고), 5–10 Hz rms(자이로 주축·3축 크기·각가속도, 가속도 주축·3축 크기),
       모드 주파수·감쇠비(감쇠 사인 맞춤, 로그 감소율 병기 — 통계는 R² 0.8 이상 시행만), 정착 시간(2–20 Hz 포락선이 잡음 바닥 2배 아래로 0.3 s 이어지는 첫 시각, 유지 구간 끝까지 봄),
       명령 정지부터 정착까지(settle_cmd_s = 정지 지연 + 정착 시간), 엔코더 몫(같은 창 엔코더 각속도 rms / 끝단), 명령 이동 시간(t_move_s = 거리 / 속도).
@@ -271,6 +272,8 @@ def main():
     ap.add_argument("--out", default="", help="결과 CSV")
     ap.add_argument("--trial-out", default="", help="시행(기록)별 중앙값 CSV — 왕복 기록의 정지 창들을 hold·bhold마다 하나로")
     ap.add_argument("--judge", action="store_true", help="성형 조건별 시행 중앙값(범위)과 성형 없음 대비 비·판정 표를 마크다운으로")
+    ap.add_argument("--plan", default="", help="mit_trials 목록 CSV — 시행 표에 idx·block·retake_of를 붙이고 판정의 재측정 처리를 정함")
+    ap.add_argument("--retake", choices=["replace", "all", "orig"], default="replace", help="--plan이 있을 때 판정에 넣는 시행: replace = 재측정이 있으면 원래 시행 대신 재측정(기본), all = 모두, orig = 원래 시행만")
     ap.add_argument("--plot", default="", help="현상 그림 PNG(첫 기록의 첫 정지)")
     a = ap.parse_args()
     try:
@@ -298,11 +301,18 @@ def main():
     if a.summary and rows:
         summary(rows)
     if rows and (a.trial_out or a.judge):
-        tr = trials(rows)
+        tr = trials(rows); keep = None
+        if a.plan:  # 목록의 idx·block·retake_of를 시행 표에 붙이고, 판정에 넣을 시행을 고름
+            pl = pd.read_csv(a.plan); pl = pl[pl.status == "done"]; info = {r.file: r for r in pl.itertuples()}
+            for r in tr:
+                x = info.get(r["file"]); r.update(idx=x.idx if x is not None else "", block=x.block if x is not None else "", retake_of="" if x is None or pd.isna(x.retake_of) else int(x.retake_of))
+            replaced = {int(x) for x in pl.retake_of.dropna()}; drop = {"replace": lambda r: r["idx"] in replaced, "orig": lambda r: r["retake_of"] != "", "all": lambda r: False}[a.retake]
+            keep = [r for r in tr if not drop(r)]
+            print(f"재측정 처리: {a.retake} — 재측정 {int(pl.retake_of.notna().sum())}시행, 판정에 넣은 시행 {len({r['file'] for r in keep})} / {len({r['file'] for r in tr})}")
         if a.trial_out:
             os.makedirs(os.path.dirname(os.path.abspath(a.trial_out)), exist_ok=True); pd.DataFrame(tr).to_csv(a.trial_out, index=False); print("시행별 표:", a.trial_out)
         if a.judge:
-            judge(tr)
+            judge(tr if keep is None else keep)
     if a.out and rows:
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
         with open(a.out, "w", newline="") as f:

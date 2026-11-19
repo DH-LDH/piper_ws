@@ -1366,3 +1366,57 @@ J2 토크와 변화율 제한(추종층 시행 11개):
 - 위치 모드 기록은 튐이 없어 제외할 창이 없고, 기준이 움직인 구간(예비 동작부터 복귀까지)을 같은 식으로 썼다.
 - 추종층 조건의 이탈은 pd의 1/14–1/15(13.6–15.2배 차), 위치 모드의 1/2.4–1/2.7이다. 확인 시행 1회씩의 값(pd 0.92°, tde 0.07°, asmc3 0.06°)과 같은 수준이다.
 - pd의 이탈은 거의 전부 처짐이다(정지 구간에서 +0.91° 아래로 처진 채 서 있음). 위치 모드의 이탈은 등속 구간의 뒤따름(0.35°)이다.
+
+### 12.2 (가) 묶음 준비 — MIT 기준 궤적의 입력 성형, 시행 실행기, 판정의 재측정 처리 (9절 11/19 30번·29번, 가짜 팔로만 확인)
+
+고친 것:
+
+| 파일 | 내용 |
+|---|---|
+| `tools/mit_probe.py` | `--stage ramp`에 `--shape none/zv/zvd`, `--shape-f`(기본 7.0 Hz), `--shape-zeta`(기본 0.10). `vib_probe.py`와 같은 식(임펄스열 값이 같음을 확인: ZVD 0.334 / 0.488 / 0.178 @ 0 / 72 / 144 ms)을 등속 구간과 돌아가는 구간의 기준 각·속도에 적용한다. 기준 가속도는 그대로 0. 성형하면 등속 구간이 144 ms 길어지고 유지 구간은 성형된 기준이 멈춘 뒤 시작한다. 파일 이름에 `_zvd`, `.meta.json`에 `shape`(vib_probe와 같은 형식) |
+| `tools/mit_trials.py` | 조건 이름 뒤에 `+zv`·`+zvd`를 붙일 수 있다(`pos+zvd`, `pd+zvd`, `asmc3+zvd` 등). 기존 조건과 기존 목록은 그대로 돈다 |
+| `tools/vib_stop_report.py` | `--plan 목록.csv`를 주면 시행 표에 `idx`·`block`·`retake_of`를 붙이고, `--judge`는 재측정이 있는 시행을 재측정으로 바꿔 넣는다(9절 11/19 29번의 B, 시행 단위). `--retake all`·`orig`로 다른 방식. `--plan` 없이 쓰면 전과 같다 |
+
+확인:
+
+- 성형 없이 돌리면 기준 궤적이 고치기 전과 같다(태그 `pre-j2lim5-20261119`의 `ramp_segs`·`ramp_at`과 전 구간 비교, 각·속도 차 0, 구간 이름·길이 같음).
+- `--plan` 없는 `vib_stop_report`의 출력은 저장소의 `d1b_stops.csv`·`d1b_trials.csv`와 같다. `--plan docs/data/trials_d1b5_v10.csv`를 주면 판정 표가 9절 29번의 B 값(자세 A 도착 pd 0.52, tde 0.72, asmc 0.76, asmc3 0.63)으로 나온다(판정에 넣은 시행 25 / 32).
+- 가짜 팔(모델이 아니고 도구 확인용), 10 °/s × 10° 왕복 2회, J2 상한 5 N·m:
+
+| 실행 | 결과 | 출발·정지 순간의 주기당 J2 토크 변화 | 제한에 걸린 주기 |
+|---|---|---|---|
+| asmc3, 성형 없음 | 정상 종료 | 0.14–0.15 N·m | J2 6(모두 MIT 진입 0.14 s 안, 정지 창 아님) |
+| asmc3 + ZVD | 정상 종료, 기준 속도에 단이 나옴(10 → 6.7 → 1.8 → 0 °/s) | **0.04–0.05 N·m** | J2 2(MIT 진입 0.07 s 안) |
+| pd + ZVD | 정상 종료, 같은 단 | — | — |
+| `mit_trials` 여섯 조건 1블록(pd, asmc3, asmc3+zvd, pos, pd+zvd, pos+zvd) | 여섯 시행 차례로 실행, 목록에 기록. `vib_stop_report --judge --plan`이 여섯 조건(`pos`, `pos+zvd`, `pd`, `pd+zvd`, `asmc16_j123`, `asmc16_j123+zvd`)을 따로 낸다 | | |
+
+- 성형하면 출발·정지 순간의 토크 변화가 1/3로 준다(가짜 팔). 회신의 예상("15 °/s보다 안전하다")과 같은 방향이다. 실기 값은 확인 시행에서 본다.
+- 가짜 팔 기록은 지웠다.
+
+실기 순서(아직 안 함, 다한 확정 뒤):
+
+1. 확인 시행 2회(MIT라 시행마다 내려앉음, 약 62 s씩). 첫 줄은 dry-run.
+
+```bash
+python3 tools/mit_probe.py --stage ramp --joint 2 --speed 10 --dist 10 --reps 6 --hold 2 --speed-err --dev-limit 6 --speed-consec 10 --expect -0.3 121.1 -73.2 1.6 52.0 13.7 --shape zvd --imu --note chk_pd_zvd
+python3 tools/mit_probe.py --stage ramp --joint 2 --speed 10 --dist 10 --reps 6 --hold 2 --speed-err --dev-limit 6 --speed-consec 10 --expect -0.3 121.1 -73.2 1.6 52.0 13.7 --shape zvd --imu --note chk_pd_zvd --go
+python3 tools/mit_probe.py --stage ramp --joint 2 --speed 10 --dist 10 --reps 6 --hold 2 --speed-err --dev-limit 6 --speed-consec 10 --expect -0.3 121.1 -73.2 1.6 52.0 13.7 --tdc --hybrid --mbar 0.01 --dist-mode torque --asmc16 --eps 0.08 --tdc-joints 1 2 3 --tau-rate 0.3 --j2-tau-limit 5 --shape zvd --imu --note chk_asmc3_zvd --go
+```
+
+   볼 것(9절 30번): 엔코더 속도에 단이 나오는지(명령 정지 기준 −150–+50 ms 표, 두 정지 쪽 — 11.4절과 같은 표), 변화율 제한이 튐 창 밖에서 걸리는지, J2 토크 최대(5 N·m에 닿는지).
+
+2. 본 묶음: 여섯 조건 × 5블록 = 30시행(MIT 20, 위치 모드 10) + 재측정. seed 1의 1블록 순서는 pd → asmc3 → asmc3+zvd → pos → pd+zvd → pos+zvd.
+
+```bash
+python3 tools/mit_trials.py make docs/data/trials_d1c_v10.csv --speed 10 --conds pos pos+zvd pd asmc3 pd+zvd asmc3+zvd --reps 5 --j2-tau-limit 5
+python3 tools/mit_trials.py run docs/data/trials_d1c_v10.csv --imu
+python3 tools/mit_trials.py run docs/data/trials_d1c_v10.csv --imu --go      # 시행마다 반복, MIT 시행 뒤 복구(clear_arm_fault → traj_test)
+```
+
+3. 분석(B 집계가 기본):
+
+```bash
+python3 tools/vib_stop_report.py $(awk -F, 'NR>1 && $8=="done"{print ($3 ~ /^pos/ ? "logs/vib/" : "logs/mit/") $11}' docs/data/trials_d1c_v10.csv) --all --judge --plan docs/data/trials_d1c_v10.csv --out docs/data/d1c_stops.csv --trial-out docs/data/d1c_trials.csv
+```
+
+   미리 정한 비교 셋(9절 30번): asmc3 + ZVD 대 asmc3, asmc3 + ZVD 대 pd, asmc3 + ZVD 대 위치 모드 + ZVD. 창 최대 병기, 앞·뒤 창은 12.1절과 같은 방법으로.
