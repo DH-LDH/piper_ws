@@ -65,6 +65,8 @@ def gaps(t, t1, t2):  # 창 안 표본 빈틈(간격이 기록 중앙값의 1.5�
 
 
 def fit_decay(t, y):  # y ≈ A e^{−ζωt} cos(ω_d t + φ) — (f, ζ, R²)
+    if len(y) < int(0.3 * FS):  # 첫 봉우리가 창 끝에 있으면(튐이 창 끝에 걸림) 맞출 구간이 없음
+        return (float("nan"),) * 4
     X = np.abs(np.fft.rfft(y * np.hanning(len(y)), 8 * len(y))); f = np.fft.rfftfreq(8 * len(y), 1 / FS); b = (f >= 2) & (f <= 20)
     f0 = float(f[b][np.argmax(X[b])]); best = None
 
